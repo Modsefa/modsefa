@@ -1,0 +1,12 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:modsefa-lib"
+    - path: "client"
+      component: "lib:modsefa-client"
+    - path: "examples"
+      component: "lib:modsefa-examples"
+    - path: "app"
+      component: "exe:modsefa"
+    - path: "test-utils"
+      component: "lib:modsefa-test-utils"

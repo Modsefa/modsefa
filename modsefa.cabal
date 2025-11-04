@@ -1,0 +1,187 @@
+cabal-version:      3.6
+name:               modsefa
+version:            0.1.0
+license:            Apache-2.0
+license-file:       LICENSE
+copyright:          (c) The Modsefa Project
+author:             The Modsefa Project
+maintainer:         Nicholas Meyer <nrmeyer@ptrx.xyz>
+bug-reports:        https://github.com/Modsefa/modsefa/issues
+stability:          experimental
+homepage:           https://www.modsefa.com
+synopsis:           A type-safe DSL for Cardano smart contract specification, generating validator scripts and transaction builders
+category:           Blockchain, Domain Specific Languages, Cardano
+description:
+  Modsefa provides a Haskell-based, type-safe Domain Specific Language (DSL)
+  for defining Cardano smart contract applications. It leverages type-level
+  programming and singletons to enable compile-time validation of specifications.
+  
+  Key features include:
+  * Type-Safe Specifications: Define application structure (validators, states, actions, constraints) using Haskell's type system.
+  * Singleton Representation: Bring type-level specifications to the value level for runtime analysis and processing.
+  * Intermediate Representation (IR): Compiles specifications into a backend-agnostic IR.
+  * Code Generation: Generates Plutus Tx validator scripts from the IR using Template Haskell.
+  * Transaction Building: Provides tools for constructing transaction skeletons based on action specifications.
+  * Client Utilities: Includes helpers for client-side interaction and querying.
+  * Testing Utilities: Offers tools for negative testing via transaction skeleton corruption.
+
+source-repository head
+  type:     git
+  location: https://github.com/Modsefa/modsefa
+
+common common
+  default-language:   Haskell2010
+  default-extensions:
+    DataKinds
+    OverloadedStrings
+    TemplateHaskell
+  ghc-options:        -Wall -Wincomplete-uni-patterns -Wunused-packages
+                      -fno-show-valid-hole-fits
+
+common plutus-ghc-options
+  ghc-options:
+    -ddump-splices
+    -fno-ignore-interface-pragmas -fno-omit-interface-pragmas
+    -Wno-partial-type-signatures
+    -fexpose-all-unfoldings -fobject-code
+    -fplugin-opt PlutusTx.Plugin:defer-errors
+    -fplugin-opt PlutusTx.Plugin:max-simplifier-iterations-uplc=10
+    -fplugin-opt PlutusTx.Plugin:remove-trace
+    -O2
+    -fplugin-opt PlutusTx.Plugin:target-version=1.1.0
+    -fplugin PlutusTx.Plugin
+
+library modsefa-lib
+  import:           common, plutus-ghc-options
+  visibility:       public
+  hs-source-dirs:   src
+  exposed-modules:
+    Modsefa.CodeGen.Generation
+    Modsefa.CodeGen.Generation.Constraints
+    Modsefa.CodeGen.Generation.InstanceChecks
+    Modsefa.CodeGen.Generation.Logic
+    Modsefa.CodeGen.Generation.Validators
+    Modsefa.CodeGen.Generation.ValueResolution
+    Modsefa.Core.Actions
+    Modsefa.Core.Validation
+    Modsefa.Core.ValidatorScript
+    Modsefa.Core.Foundation
+    Modsefa.Core.Foundation.Constraints
+    Modsefa.Core.Foundation.TypeFamilies
+    Modsefa.Core.Foundation.Types
+    Modsefa.Core.IR.Compiler
+    Modsefa.Core.IR.Types
+    Modsefa.Core.Singletons
+    Modsefa.Core.Singletons.Analysis
+    Modsefa.Core.Singletons.Auto
+    Modsefa.Core.Singletons.Types
+    Modsefa.Core.Transaction
+    Modsefa.Core.Transaction.Analysis
+    Modsefa.Core.Transaction.Builder
+    Modsefa.Core.Transaction.Constraints
+    Modsefa.Core.Transaction.Context
+    Modsefa.Core.Transaction.Operations
+    Modsefa.Core.Transaction.Parameters
+    Modsefa.Core.Transaction.Predicate
+    Modsefa.Core.Transaction.Types
+    Modsefa.Core.Transaction.Utils
+  build-depends:
+    , base >= 4.14 && < 5
+    , atlas-cardano
+    , containers
+    , mtl
+    , plutus-core
+    , plutus-ledger-api
+    , plutus-tx
+    , plutus-tx-plugin
+    , template-haskell
+    , text
+
+library modsefa-client
+  import:           common
+  visibility:       public
+  hs-source-dirs:   client
+  exposed-modules:
+    Modsefa.Client
+    Modsefa.Client.ActionParams
+    Modsefa.Client.ActionParams.TH
+    Modsefa.Client.ActionParams.Types
+    Modsefa.Client.Shortcuts
+    Modsefa.Client.TransactionRunner
+    Modsefa.Client.Types
+    Modsefa.Client.Utils
+    Modsefa.Client.Wallet
+  build-depends:
+    , base >= 4.14 && < 5
+    , modsefa:modsefa-lib
+    , atlas-cardano
+    , plutus-ledger-api
+    , pretty-simple
+    , template-haskell
+    , text
+    , time
+
+library modsefa-examples
+  import:           common, plutus-ghc-options
+  visibility:       public
+  hs-source-dirs:   examples
+  exposed-modules:
+    Modsefa.Examples.Feed.Client
+    Modsefa.Examples.Feed.Generated
+    Modsefa.Examples.Feed.Scripts
+    Modsefa.Examples.Feed.Spec
+    Modsefa.Examples.Feed.Test
+    Modsefa.Examples.Feed.Types
+    Modsefa.Examples.Feed.Validators
+    Modsefa.Examples.Subscription.Client
+    Modsefa.Examples.Subscription.Generated
+    Modsefa.Examples.Subscription.Scripts
+    Modsefa.Examples.Subscription.Spec
+    Modsefa.Examples.Subscription.Test
+    Modsefa.Examples.Subscription.Types
+    Modsefa.Examples.Subscription.Validators
+  build-depends:
+    , base >= 4.14 && < 5
+    , modsefa:modsefa-client
+    , modsefa:modsefa-lib
+    , modsefa:modsefa-test-utils
+    , atlas-cardano
+    , plutus-core
+    , plutus-ledger-api
+    , plutus-tx
+    , plutus-tx-plugin
+    , pretty-simple
+    , text
+
+library modsefa-test-utils
+  import:           common
+  visibility:       public
+  hs-source-dirs:   test-utils
+  exposed-modules:
+    Modsefa.Test.GenericCorruption
+    Modsefa.Test.Harness
+    Modsefa.Test.RefAwareMutation
+  build-depends:
+    , base >= 4.14 && < 5
+    , modsefa:modsefa-client
+    , modsefa:modsefa-lib
+    , atlas-cardano
+    , containers
+    , mtl
+    , plutus-ledger-api
+    , text
+
+executable modsefa
+  import:           common
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  ghc-options:      -O2 -threaded -rtsopts -with-rtsopts=-T
+  build-depends:
+    , base >= 4.14 && < 5
+  if flag(threaded)
+    ghc-options:    -threaded
+
+flag threaded
+  description:      Enable threaded runtime
+  default:          True
+  manual:           True
