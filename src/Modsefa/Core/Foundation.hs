@@ -21,12 +21,16 @@ import Modsefa.Core.Foundation
 -}
 module Modsefa.Core.Foundation
   ( -- * Re-exports
-    module Modsefa.Core.Foundation.Constraints
+    module Modsefa.Core.Foundation.App
+  , module Modsefa.Core.Foundation.Constraints
   , module Modsefa.Core.Foundation.TypeFamilies
   , module Modsefa.Core.Foundation.Types
+  , module Modsefa.Core.Foundation.Validator
   ) where
 
 -- Foundation modules
+import Modsefa.Core.Foundation.App
 import Modsefa.Core.Foundation.Constraints
 import Modsefa.Core.Foundation.TypeFamilies  
 import Modsefa.Core.Foundation.Types
+import Modsefa.Core.Foundation.Validator

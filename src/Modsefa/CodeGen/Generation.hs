@@ -48,10 +48,12 @@ module Modsefa.CodeGen.Generation
   ( -- * Re-exports from Generation modules
     module Modsefa.CodeGen.Generation.Constraints
   , module Modsefa.CodeGen.Generation.Logic
+  , module Modsefa.CodeGen.Generation.State
   , module Modsefa.CodeGen.Generation.Validators
   ) where
 
 -- Generation modules re-exported
 import Modsefa.CodeGen.Generation.Constraints
 import Modsefa.CodeGen.Generation.Logic
+import Modsefa.CodeGen.Generation.State
 import Modsefa.CodeGen.Generation.Validators

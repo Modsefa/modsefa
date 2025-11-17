@@ -18,7 +18,8 @@ module Modsefa.Client.Utils
   ) where
 
 import Data.Proxy (Proxy(Proxy))
-import GHC.TypeLits (KnownSymbol, symbolVal)
+import Data.Typeable (Typeable, typeRep)
+import GHC.TypeLits (KnownSymbol)
 import Text.Pretty.Simple (pPrint)
 
 import GeniusYield.Types
@@ -28,14 +29,13 @@ import GeniusYield.Types
 import PlutusLedgerApi.V1 (getTxId, txOutRefId, txOutRefIdx)
 import PlutusLedgerApi.V3 (PubKeyHash, TxId(TxId), TxOutRef(TxOutRef))
 
-import Modsefa.Core.Foundation (GetStateData, GetStateName)
+import Modsefa.Core.Foundation (DatumName, StateDatum, StateSpec)
 import Modsefa.Core.Singletons (SAppInstance)
 
 import Modsefa.Client.Types (StateInstance(siData))
 
 
 -- | Reads a payment signing key from a file and derives the corresponding Plutus PubKeyHash.
---   Requires network configuration to determine the correct address derivation.
 getPkhFromSKeyFile
   :: FilePath -- ^ Path to the user's payment signing key file (e.g., "spender.skey").
   -> IO PubKeyHash
@@ -49,14 +49,19 @@ getPkhFromSKeyFile skeyPath = do
 -- | Executes a Modsefa state query function for a given app instance
 --   and pretty-prints the result(s).
 queryAndPrintState
-  :: forall app st f.
-     (Show (GetStateData st), KnownSymbol (GetStateName st)) -- Require Show and KnownSymbol
-  => (SAppInstance app -> IO (f (StateInstance st))) -- Query function (f is Maybe or [])
-  -> (f (StateInstance st) -> [StateInstance st]) -- Function to extract list
-  -> SAppInstance app -- The application instance to query
+  :: forall app s f.
+     ( Show (StateDatum s)
+     , StateSpec s
+     , Typeable s
+     , KnownSymbol (DatumName s)
+     )
+  => (SAppInstance app -> IO (f (StateInstance s))) -- ^ Query function (f is Maybe or []).
+  -> (f (StateInstance s) -> [StateInstance s]) -- ^ Function to extract list.
+  -> SAppInstance app -- ^ The application instance to query.
   -> IO ()
 queryAndPrintState queryFn extractFn appInstance = do
-  let stateName = symbolVal (Proxy @(GetStateName st)) -- Get state name from type
+  -- Use typeRep to get the State Tag name
+  let stateName = show (typeRep (Proxy @s))
   putStrLn $ "Querying " ++ stateName ++ " state..." -- Use state name in log
   result <- queryFn appInstance
   let instances = extractFn result

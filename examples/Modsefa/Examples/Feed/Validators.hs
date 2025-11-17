@@ -44,7 +44,7 @@ instance ValidatorSpec FeedValidator where
   -- Here, it requires a single parameter named "bootstrapUtxo" of type 'TxOutRef',
   -- used for the initialization action ('InitializeFeedSpec').
   type Params FeedValidator = '[ '("bootstrapUtxo", TxOutRef) ]
-  -- | Specifies the 'StateType's managed by this validator.
+  -- | Specifies the 'StateSpec's managed by this validator.
   -- The FeedValidator manages both the configuration ('FeedConfigState') and the data entries ('FeedDataState').
   type ManagedStates FeedValidator = '[FeedConfigState, FeedDataState]
   -- | Provides the symbolic name used to refer to this validator in the 'AppSpec'.

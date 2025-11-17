@@ -31,16 +31,15 @@ module Modsefa.CodeGen.Generation.Logic
   ( generateLogicFromIR
   ) where
 
-import Data.List (nub)
+import Data.List (find, nub)
 import Data.Text (Text, unpack)
 import Language.Haskell.TH
   ( Body(NormalB), Clause(Clause), Dec(FunD, ValD), Exp (LetE), Name, Pat(VarP), Q
-  , Quote(newName), conT, integerL, listE, litE, mkName, stringL, varE
-  , varP
+  , Quote(newName), Type, conT, integerL, listE, litE, mkName, stringL, varE, varP
   )
 import Prelude
-  ( Bool(..), String, any, elem, filter, foldl, foldr, fromIntegral, length
-  , map, return, ($), (++), (<$>)
+  ( Bool(..), String, any, elem, error, fail, filter, foldl, foldr, fromIntegral
+  , length, map, return, ($), (++), (<$>), (==)
   )
 
 import PlutusLedgerApi.V3
@@ -56,46 +55,48 @@ import PlutusTx (fromBuiltinData)
 import PlutusTx.AssocMap (keys, lookup)
 import PlutusTx.Builtins.HasOpaque (stringToBuiltinByteString)
 import PlutusTx.Prelude
-  ( Bool(..), Eq, Integer, Maybe(..), all, any, elem, filter
-  , head, isJust, length, mapMaybe, not, null, traceError, traceIfFalse, (&&), (==)
-  , (||), (>), (++)
+  ( Bool(..), Eq, Integer, Maybe(..), all, any, elem, filter, head, isJust, length
+  , mapMaybe, not, null, traceError, traceIfFalse, (&&), (==), (||), (>), (++)
   )
 
 import Modsefa.Core.IR.Types
   ( ActionIR(..), BatchOperationIR(..), CollectionConstraintIR(..)
-  , FieldValueIR (..), OperationIR(..), ValidatorIR(..)
+  , FieldValueIR (..), OperationIR(..), StateInfoIR(..), ValidatorIR(..)
   )
 
 import Modsefa.CodeGen.Generation.Constraints (generateConstraintChecksForAction)
 import Modsefa.CodeGen.Generation.ValueResolution (generateValueExpression)
 
 
+-- ============================================================================
+-- 1. TOP-LEVEL LOGIC GENERATION
+-- ============================================================================
+
 -- | Generates the main Plutus Tx logic function ('Dec') for a validator from its 'ValidatorIR'.
 -- This function will have the type @ParamType -> ScriptContext -> Bool@.
-generateLogicFromIR :: Name -- ^ The Template Haskell 'Name' for the function to be generated (e.g., `mkParameterizedMyValidator`).
+generateLogicFromIR :: [StateInfoIR] -- ^ The application state registry.
+                    -> Name -- ^ The Template Haskell 'Name' for the function to be generated.
                     -> ValidatorIR -- ^ The Intermediate Representation of the validator.
                     -> Q Dec -- ^ A Template Haskell computation returning the function definition 'Dec'.
-generateLogicFromIR funcName ir = do
-  -- Create TH names for variables used in the generated code.
+generateLogicFromIR registry funcName ir = do
   actionNameVar <- newName "actionName"
-  -- Generate the main expression, which decodes the redeemer and dispatches to the correct action logic.
-  dispatchExp <- generateActionDispatchChain actionNameVar ir (validatorIRActions ir)
-  -- Define the function clause: funcName param ctx = <dispatchExp>
+  dispatchExp <- generateActionDispatchChain registry actionNameVar ir (validatorIRActions ir)
   let funcClause = Clause [VarP (mkName "param"), VarP (mkName "ctx")] (NormalB dispatchExp) []
-  -- Return the complete function definition.
   return $ FunD funcName [funcClause]
 
--- | (Internal) Generates the top-level Plutus Tx 'Exp' that decodes the redeemer ('BuiltinByteString')
--- representing the action name and then uses 'buildIfChain' to create the conditional logic
--- based on this name. It also extracts the validator's own address from the 'ScriptContext'.
-generateActionDispatchChain :: Name -- ^ TH 'Name' of the variable holding the decoded action name.
+-- ============================================================================
+-- 2. ACTION DISPATCH & LOGIC
+-- ============================================================================
+
+-- | (Internal) Generates the top-level Plutus Tx 'Exp' that decodes the redeemer
+-- and dispatches to the correct action logic.
+generateActionDispatchChain :: [StateInfoIR] 
+                            -> Name -- ^ TH 'Name' of the variable holding the decoded action name.
                             -> ValidatorIR -- ^ The validator IR (needed for context, though maybe not directly used here).
                             -> [ActionIR] -- ^ List of actions handled by this validator.
                             -> Q Exp -- ^ TH computation returning the dispatch expression.
-generateActionDispatchChain actionNameVar ir actions = do
-  -- Build the nested if/then/else structure for action dispatch.
-  ifChain <- buildIfChain actionNameVar ir actions
-  -- Construct the outer let expression that decodes the redeemer and finds the script's own address.
+generateActionDispatchChain registry actionNameVar ir actions = do
+  ifChain <- buildIfChain registry actionNameVar ir actions
   [| let
         -- Standard Plutus script boilerplates
         info = scriptContextTxInfo ctx
@@ -119,21 +120,18 @@ generateActionDispatchChain actionNameVar ir actions = do
     |]
 
 -- | (Internal) Recursively builds a nested Plutus Tx if/then/else expression ('Exp')
--- to dispatch based on the action name. Compares the decoded action name against the
--- name of each 'ActionIR' in the list.
-buildIfChain :: Name -- ^ TH 'Name' of the variable holding the decoded action name.
+-- to dispatch based on the action name.
+buildIfChain :: [StateInfoIR] -- ^ Mapping of state name with data names
+             -> Name -- ^ TH 'Name' of the variable holding the decoded action name.
              -> ValidatorIR -- ^ The validator IR (passed down for context).
              -> [ActionIR] -- ^ Remaining list of actions to build branches for.
              -> Q Exp -- ^ TH computation returning the conditional expression.
--- Base case: No actions left. If the redeemer didn't match any known action, trigger an error.
-buildIfChain _ _ [] =
+buildIfChain _ _ _ [] =
   [| traceError "buildIfChain: Redeemer does not match any known action" |]
-buildIfChain actionNameVar ir (action : rest) = do
+buildIfChain registry actionNameVar ir (action : rest) = do
   let actionNameText = actionIRName action
-  -- Generate the Plutus Tx expression representing the validation logic for this specific action.
-  actionLogic <- generateActionLogic ir action
-  -- Recursively build the 'else' part of the chain for the remaining actions.
-  restOfChain <- buildIfChain actionNameVar ir rest
+  actionLogic <- generateActionLogic registry ir action
+  restOfChain <- buildIfChain registry actionNameVar ir rest
 
   -- Create the condition: actionNameVar == "ActionNameLiteral"
   let actionNameString = unpack actionNameText
@@ -148,24 +146,22 @@ buildIfChain actionNameVar ir (action : rest) = do
   [| if $(condition) then $(successBranch) else $(return restOfChain) |]
 
 -- | (Internal) Generates the complete Plutus Tx validation logic ('Exp') for a single 'ActionIR'.
--- Combines the validation expressions generated for the action's constraints and operations.
--- Also handles setting up let-bindings for resolved reference inputs.
-generateActionLogic :: ValidatorIR -- ^ The validator IR.
+generateActionLogic :: [StateInfoIR] -- ^ Mapping of state name to datum name
+                    -> ValidatorIR -- ^ The validator IR.
                     -> ActionIR -- ^ The specific action IR to generate logic for.
                     -> Q Exp -- ^ TH computation returning the combined validation expression.
-generateActionLogic ir action = do
-  -- Generate the expression for checking all constraints.
-  constraintChecksExp <- generateConstraintChecksForAction action
-  -- Generate the expression for checking relevant operations (based on managed states).
-  operationChecksExp <- generateOperationChecks ir action
-  -- Generate expression for checking minting/burning if applicable.
-  mintingChecksExp <- generateMintingChecks ir (actionIROperations action)
+generateActionLogic registry ir action = do
+  -- Note: We will eventually need to pass 'registry' here too, but let's fix one thing at a time.
+  constraintChecksExp <- generateConstraintChecksForAction registry action
+  -- Pass registry to operation checks
+  operationChecksExp <- generateOperationChecks registry ir action
+  mintingChecksExp <- generateMintingChecks registry ir (actionIROperations action)
 
   -- Find all unique states referenced via 'ReferenceOpIR' within this action.
   let referencedStates = collectReferencedStates action
 
   -- Generate the 'let' bindings (as TH 'Dec's) needed to look up and decode reference inputs.
-  refInputBindings <- generateRefInputBindings referencedStates
+  refInputBindings <- generateRefInputBindings registry referencedStates
 
   -- Construct the final expression:
   -- let <ref input bindings>
@@ -182,27 +178,29 @@ generateActionLogic ir action = do
           constraintChecksResult && operationChecksResult
       |]
 
--- | (Internal) Generates the Plutus Tx validation logic ('Exp') for all operations within an 'ActionIR'
--- that are relevant to the current validator (i.e., operate on states listed in 'validatorIRManagedStates').
-generateOperationChecks :: ValidatorIR -> ActionIR -> Q Exp
-generateOperationChecks validatorIR action =
+-- ============================================================================
+-- 3. OPERATION CHECK GENERATION
+-- ============================================================================
+
+-- | (Internal) Generates the Plutus Tx validation logic ('Exp') for all operations within an 'ActionIR'.
+generateOperationChecks :: [StateInfoIR] -> ValidatorIR -> ActionIR -> Q Exp
+generateOperationChecks registry validatorIR action =
   let
     managedStates = validatorIRManagedStates validatorIR
     allOps = actionIROperations action
     relevantOps = Prelude.filter (\op -> getOpStateName op `Prelude.elem` managedStates) allOps
-    checks :: [Q Exp]
-    checks = Prelude.map (generateSingleOperationCheck action) relevantOps
+    -- Pass registry to single operation check (Fixes Errors 2 & 3)
+    checks = Prelude.map (generateSingleOperationCheck registry action) relevantOps
   in
     foldr (\a b -> [| $a && $b |]) [|True|] checks
 
--- | Generates validation for a single operation.
-generateSingleOperationCheck :: ActionIR -> OperationIR -> Q Exp
-
-generateSingleOperationCheck action (CreateOpIR stateName fields) =
+-- | (Internal) Generates the Plutus Tx validation logic for a single 'OperationIR'.
+-- Uses the state registry to resolve datum types for 'fromBuiltinData' casts.
+generateSingleOperationCheck :: [StateInfoIR] -> ActionIR -> OperationIR -> Q Exp
+generateSingleOperationCheck registry action (CreateOpIR stateName fields) =
   let
-    stateTypeName = conT (mkName (unpack stateName))
-    -- Get the checks for constant fields
-    constantChecks = generateFieldValidationChecks action fields
+    datumTypeQ = lookupDatumType registry stateName
+    constantChecks = generateFieldValidationChecks registry action fields
   in
   [| let
         outputsToSelf = PlutusTx.Prelude.filter (\o -> txOutAddress o PlutusTx.Prelude.== ownAddress) (txInfoOutputs (scriptContextTxInfo ctx))
@@ -211,7 +209,7 @@ generateSingleOperationCheck action (CreateOpIR stateName fields) =
         isValidOutput :: TxOut -> Bool
         isValidOutput txOut = case txOutDatum txOut of
             OutputDatum (Datum d) ->
-                case (fromBuiltinData d :: Maybe $stateTypeName) of
+                case (fromBuiltinData d :: Maybe $datumTypeQ) of
                     Just outputDatum -> $(
                         -- Combine all constant checks with AND
                         let allChecks = foldr (\a b -> [| $a && $b |]) [|True|] constantChecks
@@ -224,12 +222,11 @@ generateSingleOperationCheck action (CreateOpIR stateName fields) =
         traceIfFalse $(litE (stringL ("CreateOp failed: Could not find a valid created output for state " Prelude.++ unpack stateName)))
             (PlutusTx.Prelude.any isValidOutput outputsToSelf)
     |]
-generateSingleOperationCheck action (UpdateOpIR stateName fields) =
+generateSingleOperationCheck registry action (UpdateOpIR stateName fields) =
     let
-        stateTypeName = conT (mkName (unpack stateName))
+        datumTypeQ = lookupDatumType registry stateName
         preservedFields = [fieldName | (fieldName, FromInputField _) <- fields]
-        -- Get the checks for constant fields
-        fieldChecks = generateFieldValidationChecks action fields
+        fieldChecks = generateFieldValidationChecks registry action fields
         preservationChecks = Prelude.map (\fieldName ->
             let fieldAccessor = varE (mkName (unpack fieldName)) in
             [| $fieldAccessor inputDatum PlutusTx.Prelude.== $fieldAccessor outputDatum |]
@@ -244,27 +241,27 @@ generateSingleOperationCheck action (UpdateOpIR stateName fields) =
 
                     shapeIsValid = PlutusTx.Prelude.length inputsFromSelf PlutusTx.Prelude.== 1
 
-                    inputDatum :: $stateTypeName
+                    inputDatum :: $datumTypeQ
                     inputDatum = case PlutusLedgerApi.V3.txOutDatum (PlutusLedgerApi.V3.txInInfoResolved (PlutusTx.Prelude.head inputsFromSelf)) of
                         PlutusLedgerApi.V3.OutputDatum (PlutusLedgerApi.V3.Datum d) ->
-                            case (PlutusTx.fromBuiltinData d :: Maybe $stateTypeName) of
+                            case (PlutusTx.fromBuiltinData d :: Maybe $datumTypeQ) of
                                 Just dat -> dat
                                 Nothing  -> PlutusTx.Prelude.traceError "Could not decode input datum for update"
                         _ -> PlutusTx.Prelude.traceError "Update input missing inline datum"
 
-                    outputCandidates :: [$stateTypeName]
+                    outputCandidates :: [$datumTypeQ]
                     outputCandidates =
                         let
                             outputsToSelf = PlutusTx.Prelude.filter (\o -> PlutusLedgerApi.V3.txOutAddress o PlutusTx.Prelude.== ownAddress) (PlutusLedgerApi.V3.txInfoOutputs info)
-                            extractDatum :: PlutusLedgerApi.V3.TxOut -> Maybe $stateTypeName
+                            extractDatum :: PlutusLedgerApi.V3.TxOut -> Maybe $datumTypeQ
                             extractDatum o = case PlutusLedgerApi.V3.txOutDatum o of
-                                PlutusLedgerApi.V3.OutputDatum (PlutusLedgerApi.V3.Datum d) -> (PlutusTx.fromBuiltinData d :: Maybe $stateTypeName)
+                                PlutusLedgerApi.V3.OutputDatum (PlutusLedgerApi.V3.Datum d) -> (PlutusTx.fromBuiltinData d :: Maybe $datumTypeQ)
                                 _ -> Nothing
                         in
                             PlutusTx.Prelude.mapMaybe extractDatum outputsToSelf
 
                     -- Check if any output is a valid target
-                    anyOutputIsValid = PlutusTx.Prelude.any (\(outputDatum :: $stateTypeName) ->
+                    anyOutputIsValid = PlutusTx.Prelude.any (\(outputDatum :: $datumTypeQ) ->
                         let
                             allPreservationChecks = $(foldr (\a b -> [| $a && $b |]) [|True|] preservationChecks)
                             allConstantChecks = $(foldr (\a b -> [| $a && $b |]) [|True|] fieldChecks)
@@ -277,7 +274,7 @@ generateSingleOperationCheck action (UpdateOpIR stateName fields) =
                     PlutusTx.Prelude.traceIfFalse "UpdateOp failed: Could not find a valid output satisfying all constraints" anyOutputIsValid
             _ -> PlutusTx.Prelude.True
     |]
-generateSingleOperationCheck _action (DeleteOpIR _ ) =
+generateSingleOperationCheck _ _action (DeleteOpIR _ ) =
     [| let
           inputsFromSelf = PlutusTx.Prelude.filter (\i -> txOutAddress (txInInfoResolved i) PlutusTx.Prelude.== ownAddress) (txInfoInputs (scriptContextTxInfo ctx))
           outputsToSelf = PlutusTx.Prelude.filter (\o -> txOutAddress o PlutusTx.Prelude.== ownAddress) (txInfoOutputs (scriptContextTxInfo ctx))
@@ -285,32 +282,36 @@ generateSingleOperationCheck _action (DeleteOpIR _ ) =
           traceIfFalse "DeleteOp failed: Expected at least one input and no outputs from/to the script"
             (not (PlutusTx.Prelude.null inputsFromSelf) && PlutusTx.Prelude.null outputsToSelf)
       |]
-generateSingleOperationCheck _action (ReferenceOpIR stateName label) =
+generateSingleOperationCheck registry _action (ReferenceOpIR stateName label) =
+    let datumTypeQ = lookupDatumType registry stateName
+    in
     [| let
           inputs = txInfoInputs (scriptContextTxInfo ctx)
           refInputs = txInfoReferenceInputs (scriptContextTxInfo ctx)
           isTargetState :: TxInInfo -> Bool
           isTargetState txInInfo = case txOutDatum (txInInfoResolved txInInfo) of
-              OutputDatum (Datum d) -> isJust (fromBuiltinData d :: Maybe $(conT (mkName (unpack stateName))))
+              OutputDatum (Datum d) -> isJust (fromBuiltinData d :: Maybe $datumTypeQ)
               _ -> False
        in
           traceIfFalse $(litE (stringL ("ReferenceOp failed: Could not find reference input '" Prelude.++ unpack label Prelude.++ "'"))) (PlutusTx.Prelude.any isTargetState inputs || PlutusTx.Prelude.any isTargetState refInputs)
       |]
-generateSingleOperationCheck _action (BatchOpIR (BatchCreateIR stateName _) _ constraints) =
+generateSingleOperationCheck registry _action (BatchOpIR (BatchCreateIR stateName fields) _ constraints) =
+    let datumTypeQ = lookupDatumType registry stateName
+    in
     [| let
           outputsToSelf = PlutusTx.Prelude.filter (\o -> txOutAddress o PlutusTx.Prelude.== ownAddress) (txInfoOutputs (scriptContextTxInfo ctx))
           allDatumsAreCorrect = all
             (\output -> case txOutDatum output of
-              OutputDatum (Datum d) -> isJust (fromBuiltinData d :: Maybe $(conT (mkName (unpack stateName))))
+              OutputDatum (Datum d) -> isJust (fromBuiltinData d :: Maybe $datumTypeQ)
               _ -> False
             ) outputsToSelf
-          uniquenessChecks = $(generateUniquenessChecks stateName constraints)
+          uniquenessChecks = $(generateUniquenessChecks registry stateName constraints)
        in
           traceIfFalse "BatchCreateOp failed: Expected at least one output to self" (not (null outputsToSelf)) &&
           traceIfFalse "BatchCreateOp failed: Not all outputs had the correct datum type" allDatumsAreCorrect &&
           uniquenessChecks outputsToSelf
       |]
-generateSingleOperationCheck _action (BatchOpIR (BatchDeleteIR _) _ _) =
+generateSingleOperationCheck _ _action (BatchOpIR (BatchDeleteIR _) _ _) =
     [| let
           inputsFromSelf = PlutusTx.Prelude.filter (\i -> txOutAddress (txInInfoResolved i) PlutusTx.Prelude.== ownAddress) (txInfoInputs (scriptContextTxInfo ctx))
           outputsToSelf = PlutusTx.Prelude.filter (\o -> txOutAddress o PlutusTx.Prelude.== ownAddress) (txInfoOutputs (scriptContextTxInfo ctx))
@@ -321,22 +322,25 @@ generateSingleOperationCheck _action (BatchOpIR (BatchDeleteIR _) _ _) =
 
 -- | (Internal) Generates the on-chain validation logic ('Exp') for 'CollectionConstraintIR's,
 -- specifically 'MustHaveUniqueFieldIR'. Returns a function of type @[TxOut] -> Bool@.
-generateUniquenessChecks :: Text -- ^ State name (for datum decoding).
+generateUniquenessChecks :: [StateInfoIR] -- ^ Mapping of state type with datum type
+                         -> Text -- ^ State name (for datum decoding).
                          -> [CollectionConstraintIR] -- ^ List of collection constraints.
                          -> Q Exp -- ^ TH Expression: \[TxOut] -> Bool
-generateUniquenessChecks stateName constraints = do
+generateUniquenessChecks registry stateName constraints = do
     -- Generate check functions for each constraint.
-    let checks = Prelude.map (generateSingleUniquenessCheck stateName) constraints
+    let checks = Prelude.map (generateSingleUniquenessCheck registry stateName) constraints
     [| \outputs -> all (\check -> check outputs) $(listE checks) |]
 
 -- | (Internal) Generates the check function ('Exp') for a single 'MustHaveUniqueFieldIR'.
 -- The generated function takes the list of outputs and verifies uniqueness of the specified field.
-generateSingleUniquenessCheck :: Text -- ^ State name.
+generateSingleUniquenessCheck :: [StateInfoIR] -- ^ Mapping of state type with datum type
+                              -> Text -- ^ State name.
                               -> CollectionConstraintIR -- ^ The uniqueness constraint.
                               -> Q Exp -- ^ TH Expression: [TxOut] -> Bool
-generateSingleUniquenessCheck stateName (MustHaveUniqueFieldIR fieldName) =
+generateSingleUniquenessCheck registry stateName (MustHaveUniqueFieldIR fieldName) =
+    
     let
-      stateTypeName = conT (mkName (unpack stateName))
+      datumTypeQ = lookupDatumType registry stateName
       fieldAccessor = varE (mkName (unpack fieldName))
       fieldType = conT ''PlutusTx.Prelude.Integer
     in
@@ -348,7 +352,7 @@ generateSingleUniquenessCheck stateName (MustHaveUniqueFieldIR fieldName) =
           extractFields (o:os) =
             case txOutDatum o of
               OutputDatum (Datum d) ->
-                case (fromBuiltinData d :: Maybe $stateTypeName) of
+                case (fromBuiltinData d :: Maybe $datumTypeQ) of
                   -- The field accessor is applied, and the result must match the concrete `fieldType`
                   Just datum -> $fieldAccessor datum : extractFields os
                   Nothing    -> extractFields os
@@ -363,34 +367,18 @@ generateSingleUniquenessCheck stateName (MustHaveUniqueFieldIR fieldName) =
           isUnique (extractFields outputs)
     |]
 
--- | (Internal) Helper function to extract the state name from any 'OperationIR'.
--- Returns empty string for unrecognized operations (shouldn't happen).
-getOpStateName :: OperationIR -> Text
-getOpStateName (CreateOpIR name _) = name
-getOpStateName (UpdateOpIR name _) = name
-getOpStateName (DeleteOpIR name)   = name
-getOpStateName (BatchOpIR (BatchCreateIR name _) _ _) = name
-getOpStateName (BatchOpIR (BatchDeleteIR name) _ _) = name
-getOpStateName _ = ""
-
-isMintingOp :: OperationIR -> Bool
-isMintingOp (CreateOpIR _ _) = True
-isMintingOp (DeleteOpIR _) = True
-isMintingOp (BatchOpIR (BatchCreateIR _ _) _ _) = True
-isMintingOp (BatchOpIR (BatchDeleteIR _) _ _) = True
-isMintingOp _ = False
-
 -- | (Internal) Generates the Plutus Tx validation logic ('Exp') specific to minting policies.
 -- Checks that the correct quantity of the expected token name(s) is minted or burned, matching
 -- the 'CreateOpIR'/'DeleteOpIR'/'BatchOpIR' operations relevant to the current validator.
-generateMintingChecks :: ValidatorIR -> [OperationIR] -> Q Exp
-generateMintingChecks validatorIR allOps = do
+generateMintingChecks :: [StateInfoIR] -> ValidatorIR -> [OperationIR] -> Q Exp
+generateMintingChecks registry validatorIR allOps = do
     let managedStates = validatorIRManagedStates validatorIR
     -- Filter operations relevant to this validator AND potentially involving minting/burning.
     let relevantOps = Prelude.filter (\op -> getOpStateName op `Prelude.elem` managedStates) allOps
     let mintingOps = Prelude.filter isMintingOp relevantOps
     let checks = Prelude.map opToCheck mintingOps
     let allChecksExp = Prelude.foldl (\acc chk -> [| $(acc) && $(chk) |]) [|True|] checks
+    tokenMapVar <- newName "tokenMap"
 
     -- Determine if this is a mint or a burn action to select the right function.
     let isBurn = Prelude.any isDeleteOp relevantOps
@@ -417,9 +405,9 @@ generateMintingChecks validatorIR allOps = do
                 checkMint :: Bool
                 checkMint = case PlutusTx.AssocMap.lookup ownCS (getValue mintedValue) of
                     Nothing -> traceError "Minting check failed: ownCS lookup returned Nothing."
-                    Just tokenMap ->
+                    Just $(varP tokenMapVar) ->
                         let
-                          correctTokenCount = PlutusTx.Prelude.length (PlutusTx.AssocMap.keys tokenMap) PlutusTx.Prelude.==  $(litE (integerL (fromIntegral (Prelude.length mintingOps))))
+                          correctTokenCount = PlutusTx.Prelude.length (PlutusTx.AssocMap.keys $(varE tokenMapVar)) PlutusTx.Prelude.==  $(litE (integerL (fromIntegral (Prelude.length mintingOps))))
                         in
                           correctTokenCount && $(allChecksExp)
             in
@@ -434,13 +422,103 @@ generateMintingChecks validatorIR allOps = do
 
     opToCheck :: OperationIR -> Q Exp
     opToCheck op =
-      let tokenNameExp = [| TokenName (stringToBuiltinByteString ($(litE (stringL (unpack (getOpStateName op)))) :: String)) |]
+      let stateName = getOpStateName op
+          tokenName = lookupTokenName registry stateName
+          tokenNameExp = [| TokenName (stringToBuiltinByteString ($(litE (stringL (unpack tokenName))) :: String)) |]
       in case op of
           CreateOpIR _ _ -> [| PlutusTx.AssocMap.lookup $(tokenNameExp) tokenMap PlutusTx.Prelude.== Just 1 |]
           DeleteOpIR _ -> [| PlutusTx.AssocMap.lookup $(tokenNameExp) tokenMap PlutusTx.Prelude.== Just 1 |]
           BatchOpIR (BatchCreateIR _ _) _ _ -> [| case PlutusTx.AssocMap.lookup $(tokenNameExp) tokenMap of Just qty -> qty > 0; _ -> False |]
           BatchOpIR (BatchDeleteIR _) _ _ -> [| case PlutusTx.AssocMap.lookup $(tokenNameExp) tokenMap of Just qty -> qty > 0; _ -> False |]
           _ -> [| True |]
+
+-- | (Internal) Generates a list of Plutus Tx boolean expressions ('Q Exp') for validating
+-- the fields of a *created* or *updated* output datum ('outputDatum' must be in scope).
+-- Only includes checks for fields whose 'FieldValueIR' source is verifiable on-chain
+-- (see 'canValidateOnChain').
+generateFieldValidationChecks :: [StateInfoIR] -> ActionIR -> [(Text, FieldValueIR)] -> [Q Exp]
+generateFieldValidationChecks registry action fields =
+    let
+        validatableFields = Prelude.filter (\(_, fv) -> canValidateOnChain fv) fields
+        checks = Prelude.map (\(fieldName, fieldValue) ->
+            let
+                fieldAccessor = varE (mkName (unpack fieldName))
+                expectedValueExp = generateValueExpression registry action fieldValue
+            in
+            [| $fieldAccessor outputDatum PlutusTx.Prelude.== $(expectedValueExp) |]
+          ) validatableFields
+    in
+        checks
+
+-- | (Internal) Collects all unique referenced states (Label, StateName) from an 'ActionIR'.
+collectReferencedStates :: ActionIR -> [(Text, Text)] -- List of (Label, StateName)
+collectReferencedStates action =
+  -- Remove duplicates after mapping/filtering.
+  Data.List.nub $ mapMaybe getRefDetails (actionIROperations action)
+  where
+    -- Extracts label and state name if the operation is ReferenceOpIR.
+    getRefDetails :: OperationIR -> Maybe (Text, Text)
+    getRefDetails (ReferenceOpIR stateName label) = Just (label, stateName)
+    getRefDetails _                               = Nothing
+
+-- | (Internal) Generates Template Haskell 'let' bindings ('Dec's) to look up and decode
+-- reference inputs based on the list collected by 'collectReferencedStates'.
+-- Each binding looks like: @ref_myLabel = findReferenceInputOutput [...] :: Maybe MyStateType@
+generateRefInputBindings :: [StateInfoIR] -- ^ Mapping of state type with datum type
+                         -> [(Text, Text)] -- ^ List of (Label, StateName).
+                         -> Q [Dec] -- ^ TH computation returning list of 'ValD' declarations.
+generateRefInputBindings _ [] = return [] -- Base case: No references, no bindings.
+generateRefInputBindings registry ((label, stateName) : refs) = do
+  -- Create the variable name for the binding (e.g., ref_config).
+  let datumVarName = mkName ("ref_" Prelude.++ unpack label)
+  let datumTypeQ = lookupDatumType registry stateName
+  -- Generate the findRefInput function application for this specific state
+  let findLogicQExp = [|
+        let
+            findRefInput :: [TxInInfo] -> Maybe $datumTypeQ
+            findRefInput [] = Nothing
+            findRefInput (i:is) =
+                case txOutDatum (txInInfoResolved i) of
+                    OutputDatum (Datum d) ->
+                        -- Attempt to decode, return Just if successful, else recurse
+                        case (fromBuiltinData d :: Maybe $datumTypeQ) of
+                            Just datum -> Just datum
+                            Nothing    -> findRefInput is
+                    _ -> findRefInput is -- No datum or wrong datum type, recurse
+
+            -- Search all inputs (regular + reference)
+            allInputs = txInfoInputs (scriptContextTxInfo ctx) PlutusTx.Prelude.++ txInfoReferenceInputs (scriptContextTxInfo ctx)
+        in
+            findRefInput allInputs
+        |]
+  findLogicExp <- findLogicQExp
+  -- Create the ValD (value declaration) for the let binding
+  let binding = ValD (VarP datumVarName) (NormalB findLogicExp) []
+  -- Recursively generate bindings for the rest of the refs
+  restBindings <- generateRefInputBindings registry refs
+  return (binding : restBindings)
+
+-- ============================================================================
+-- 4. HELPER FUNCTIONS
+-- ============================================================================
+
+-- | (Internal) Helper function to extract the state name from any 'OperationIR'.
+-- Returns empty string for unrecognized operations (shouldn't happen).
+getOpStateName :: OperationIR -> Text
+getOpStateName (CreateOpIR name _) = name
+getOpStateName (UpdateOpIR name _) = name
+getOpStateName (DeleteOpIR name)   = name
+getOpStateName (BatchOpIR (BatchCreateIR name _) _ _) = name
+getOpStateName (BatchOpIR (BatchDeleteIR name) _ _) = name
+getOpStateName _ = ""
+
+-- | (Internal) Helper predicate to identify operations that involve minting or burning.
+isMintingOp :: OperationIR -> Bool
+isMintingOp (CreateOpIR _ _) = True
+isMintingOp (DeleteOpIR _) = True
+isMintingOp (BatchOpIR (BatchCreateIR _ _) _ _) = True
+isMintingOp (BatchOpIR (BatchDeleteIR _) _ _) = True
+isMintingOp _ = False
 
 -- | (Internal) Determines if a 'FieldValueIR' represents a value that can be directly
 -- validated or calculated on-chain within the validator script. Excludes sources
@@ -456,68 +534,20 @@ canValidateOnChain (FromInt _)             = True
 canValidateOnChain (FromEnum _ _)          = True
 canValidateOnChain _                       = False
 
--- | (Internal) Generates a list of Plutus Tx boolean expressions ('Q Exp') for validating
--- the fields of a *created* or *updated* output datum ('outputDatum' must be in scope).
--- Only includes checks for fields whose 'FieldValueIR' source is verifiable on-chain
--- (see 'canValidateOnChain').
-generateFieldValidationChecks :: ActionIR -> [(Text, FieldValueIR)] -> [Q Exp]
-generateFieldValidationChecks action fields =
-    let
-        validatableFields = Prelude.filter (\(_, fv) -> canValidateOnChain fv) fields
-
-        checks = Prelude.map (\(fieldName, fieldValue) ->
-            let
-                fieldAccessor = varE (mkName (unpack fieldName))
-                expectedValueExp = generateValueExpression action fieldValue
-            in
-            [| $fieldAccessor outputDatum PlutusTx.Prelude.== $(expectedValueExp) |]
-          ) validatableFields
-    in
-        checks
-
--- | (Internal) Collects all unique referenced states (Label, StateName) from an 'ActionIR'.
-collectReferencedStates :: ActionIR -> [(Text, Text)] -- List of (Label, StateName)
-collectReferencedStates action =
-  -- Use Data.List.nub to remove duplicates after mapping/filtering.
-  Data.List.nub $ mapMaybe getRefDetails (actionIROperations action)
+-- | (Internal) Looks up the datum type name for a given state tag from the registry.
+lookupDatumType :: [StateInfoIR] -> Text -> Q Type
+lookupDatumType registry stateName = do
+    case find' (\info -> stateInfoName info Prelude.== stateName) registry of
+        Just info -> conT (mkName (unpack (stateInfoDatumName info)))
+        Nothing   -> fail $ "CodeGen Error: State '" Prelude.++ unpack stateName Prelude.++ "' not found in app registry."
   where
-    -- Extracts label and state name if the operation is ReferenceOpIR.
-    getRefDetails :: OperationIR -> Maybe (Text, Text)
-    getRefDetails (ReferenceOpIR stateName label) = Just (label, stateName)
-    getRefDetails _                               = Nothing
+    find' _ [] = Nothing
+    find' p (x:xs) = if p x then Just x else find' p xs
 
--- | (Internal) Generates Template Haskell 'let' bindings ('Dec's) to look up and decode
--- reference inputs based on the list collected by 'collectReferencedStates'.
--- Each binding looks like: @ref_myLabel = findReferenceInputOutput [...] :: Maybe MyStateType@
-generateRefInputBindings :: [(Text, Text)] -- ^ List of (Label, StateName).
-                         -> Q [Dec] -- ^ TH computation returning list of 'ValD' declarations.
-generateRefInputBindings [] = return [] -- Base case: No references, no bindings.
-generateRefInputBindings ((label, stateName) : refs) = do
-  -- Create the variable name for the binding (e.g., ref_config).
-  let datumVarName = mkName ("ref_" Prelude.++ unpack label)
-  let stateTypeName = conT (mkName (unpack stateName))
-  -- Generate the findRefInput function application for this specific state
-  let findLogicQExp = [|
-        let
-            findRefInput :: [TxInInfo] -> Maybe $stateTypeName
-            findRefInput [] = Nothing
-            findRefInput (i:is) =
-                case txOutDatum (txInInfoResolved i) of
-                    OutputDatum (Datum d) ->
-                        -- Attempt to decode, return Just if successful, else recurse
-                        case (fromBuiltinData d :: Maybe $stateTypeName) of
-                            Just datum -> Just datum
-                            Nothing    -> findRefInput is
-                    _ -> findRefInput is -- No datum or wrong datum type, recurse
-
-            -- Search all inputs (regular + reference)
-            allInputs = txInfoInputs (scriptContextTxInfo ctx) PlutusTx.Prelude.++ txInfoReferenceInputs (scriptContextTxInfo ctx)
-        in
-            findRefInput allInputs
-        |]
-  findLogicExp <- findLogicQExp
-  -- Create the ValD (value declaration) for the let binding
-  let binding = ValD (VarP datumVarName) (NormalB findLogicExp) []
-  -- Recursively generate bindings for the rest of the refs
-  restBindings <- generateRefInputBindings refs
-  return (binding : restBindings)
+-- | (Internal) Looks up the token name for a given state tag from the registry.
+-- Throws a compile-time error if the state is not found.
+lookupTokenName :: [StateInfoIR] -> Text -> Text
+lookupTokenName registry stateName =
+    case find (\info -> stateInfoName info Prelude.== stateName) registry of
+        Just info -> stateInfoTokenName info
+        Nothing -> error $ "CodeGen FATAL: State '" Prelude.++ unpack stateName Prelude.++ "' not found in IR registry during token name lookup."

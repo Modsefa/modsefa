@@ -17,6 +17,7 @@ The `AppSpec` is defined as a Haskell typeclass that your application's main typ
 class
   ( InitialStateInStates app
   , ValidateAppInstanceParameters app
+  , ValidateActionTransitions (ActionTransitions app) app
   ) => AppSpec (app :: Type) where
 
   -- | List of validators in this application
@@ -29,7 +30,7 @@ class
   type InitialAppState app :: Symbol
 
   -- | Valid action transitions with their state changes
-  type ActionTransitions app :: [(TypedActionSpec app, Symbol, Symbol)]
+  type ActionTransitions app :: [(TypedActionSpec, Symbol, Symbol)]
 
   -- | Instance-specific parameters for validators
   type AppInstanceParameters app :: [(Symbol, Symbol)]
@@ -87,8 +88,8 @@ type InitialAppState FeedApp = "Uninitialized"
 
 This is one of the most critical parts of the `AppSpec`. It defines the valid state transitions that can occur in the application's state machine, triggered by specific actions.
 
-- **Type**: `[(TypedActionSpec app, Symbol, Symbol)]` - A list of tuples, where each tuple contains:
-  1. `TypedActionSpec app`: The action that triggers the transition
+- **Type**: `[(TypedActionSpec, Symbol, Symbol)]` - A list of tuples, where each tuple contains:
+  1. `TypedActionSpec`: The action that triggers the transition
   2. `Symbol`: The state before the action is executed
   3.  `Symbol`: The state after the action is successfully executed
 - **Purpose**: To define the application's state transition logic. This critically associates actions with the application and dictates the valid sequences of operations, forming the edges of the state machine graph

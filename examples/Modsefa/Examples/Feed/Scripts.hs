@@ -7,13 +7,14 @@ Maintainer  : nrmeyer@ptrx.xyz
 Stability   : experimental
 Portability : GHC
 
-This module defines the crucial 'AppValidatorScripts' instance for 
-the 'Modsefa.Examples.Feed.Spec.FeedApp'. This instance implements the
-'getValidatorScript' method, which acts as a dispatcher.
-Based on the provided validator type ('Proxy v'), it selects the appropriate
-compiled Plutus script (e.g., 'feedValidatorCompiledCode' from
-'Modsefa.Examples.Feed.Generated') and applies the resolved validator parameters
-to it, returning the final 'GYScript' ready for use in transaction building.
+This module defines the 'AppValidatorScripts' instance for the 'FeedApp'.
+
+It uses the 'generateAppValidatorScripts' Template Haskell splice, which
+automatically generates the implementation for 'getValidatorScript'. This
+generated implementation acts as a dispatcher that, based on the validator
+type, selects the correct compiled Plutus script (from
+'Modsefa.Examples.Feed.Generated') and applies the resolved validator
+parameters to it, returning the final 'GYScript' ready for use.
 -}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -23,16 +24,11 @@ to it, returning the final 'GYScript' ready for use in transaction building.
 
 module Modsefa.Examples.Feed.Scripts () where
 
-import Data.Data ((:~:)(Refl))
-import Data.Proxy (Proxy)
-import Data.Typeable (Typeable, eqT)
+import Data.Typeable (eqT)
 
-import GeniusYield.Types (GYScript, scriptFromPlutus)
+import GeniusYield.Types (scriptFromPlutus)
 
-import Modsefa.Core.Foundation 
-  ( Params, ParamsToValue, ValidatorPlutusVersion, ValidatorSpec
-  )
-import Modsefa.Core.ValidatorScript (AppValidatorScripts(getValidatorScript))
+import Modsefa.CodeGen.Generation (generateAppValidatorScripts)
 
 import Modsefa.Examples.Feed.Generated (feedValidatorCompiledCode)
 import Modsefa.Examples.Feed.Spec (FeedApp)
@@ -43,20 +39,4 @@ import Modsefa.Examples.Feed.Validators (FeedValidator)
 -- AppValidatorScripts Instance
 -- ============================================================================
 
--- | Instance connecting the 'FeedApp' specification to its concrete validator script implementations.
-instance AppValidatorScripts FeedApp where
-  -- | Retrieves the parameterized 'GYScript' for a given validator type 'v' within the 'FeedApp'.
-  -- This function uses 'eqT' for type-safe dispatching at runtime based on the 'Proxy v'.
-  -- It looks up the correct compiled code function (e.g., 'feedValidatorCompiledCode')
-  -- and applies the provided 'params' ('ParamsToValue (Params v)') to it.
-  getValidatorScript :: forall v. (ValidatorSpec v, Typeable v) =>
-    Proxy v -- ^ Proxy identifying the requested validator type (e.g., @Proxy \@FeedValidator@).
-    -> ParamsToValue (Params v) -- ^ The resolved value-level parameters for this validator instance.
-    -> GYScript (ValidatorPlutusVersion v) -- ^ The resulting parameterized Genius Yield script.
-  getValidatorScript _ params =
-    -- Check if the requested validator type 'v' is FeedValidator
-    case eqT @v @FeedValidator of
-      -- If yes, apply the params to the compiled code for FeedValidator.
-      Just Refl -> scriptFromPlutus $ feedValidatorCompiledCode params
-      -- If no match is found for any known validator in this app, raise an error.
-      Nothing -> error "No script implementation for this validator."
+$(generateAppValidatorScripts @FeedApp)

@@ -52,9 +52,8 @@ import Modsefa.Client
   ( ClientEnv(..), ModsefaClient(..), queryAndPrintState, queryStateInstances
   , runAction, withClientEnv, (+:), pattern End
   )
-import Modsefa.Core.Foundation (SStateType(SStateType))
 import Modsefa.Core.IR.Compiler (compileIR)
-import Modsefa.Core.Singletons (autoSingletonFull)
+import Modsefa.Core.Singletons (autoSingletonFull, autoSingletonStateSpec)
 import Modsefa.Test.Harness (runScenario)
 import Modsefa.Test.RefAwareMutation
   ( ActionMutation(CorruptConstantField), ActionMutationStrategy(..)
@@ -65,7 +64,7 @@ import Modsefa.Examples.Feed.Client (appInstanceBootstrapRef, mkFeedAppInstance)
 import Modsefa.Examples.Feed.Scripts ()
 import Modsefa.Examples.Feed.Spec (FeedApp, InitializeFeedSpec, UpdateFeedSpec)
 import Modsefa.Examples.Feed.Types 
-  ( FeedConfigState, FeedDataState, FeedStatus (Active)
+  ( FeedConfigState, FeedDataState, FeedStatus(Active)
   )
 
 
@@ -186,7 +185,7 @@ runFeedUpdateCorruptionTest txHashStr txIndex = do
             strategy = ActionMutationStrategy
               { mutations =
                   [ CorruptConstantField
-                      (SStateType @FeedDataState)      -- Target FeedDataState outputs
+                      (autoSingletonStateSpec @FeedDataState)      -- Target FeedDataState outputs
                       (Proxy @"feedStatus")            -- Target the 'feedStatus' field
                       -- Try to set it to Active instead of Archived
                       (toData Active)

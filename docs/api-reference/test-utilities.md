@@ -81,13 +81,13 @@ Defines specific ways to corrupt transactions for testing validator behavior. Th
 
 ```haskell
 -- Simplified representation - see source for full constraints
-data ActionMutation (app :: Type) (action :: TypedActionSpec app) where
-  CorruptPreservedFieldInRef :: SStateRef st ref -> Proxy field -> Data -> ActionMutation app action
+data ActionMutation (app :: Type) (action :: TypedActionSpec) where
+  CorruptPreservedFieldInRef :: SStateRef s ref -> Proxy field -> Data -> ActionMutation app action
   CorruptMintedTokenName :: GYTokenName -> GYTokenName -> ActionMutation app action
-  CorruptConstantField :: SStateType st -> Proxy field -> Data -> ActionMutation app action
-  CorruptCalculatedField :: SStateType st -> (GetStateData st -> GetStateData st) -> ActionMutation app action
-  CorruptReferenceInput :: SStateType st -> TxOutRef -> ActionMutation app action
-  CorruptConstraintOutput :: SStateType st -> (GYValue -> GYValue) -> ActionMutation app action
+  CorruptConstantField :: SStateSpec s -> Proxy field -> Data -> ActionMutation app action
+  CorruptCalculatedField :: SStateSpec s -> (StateDatum s -> StateDatum s) -> ActionMutation app action
+  CorruptReferenceInput :: SStateSpec s -> TxOutRef -> ActionMutation app action
+  CorruptConstraintOutput :: SStateSpec s -> (GYValue -> GYValue) -> ActionMutation app action
   -- ... potentially other constructors ...
 ```
 
@@ -98,7 +98,7 @@ _(Note: This snippet shows the structure but omits detailed type constraints for
 ```haskell
 -- Corrupt a preserved field in a specific state reference
 let fieldCorruption = CorruptPreservedFieldInRef 
-      (STypedTheOnlyInstance (SStateType @FeedConfigState))
+      (STypedTheOnlyInstance (autoSingletonStateSpec @FeedConfigState))
       (Proxy @"feedOwner")
       (toData ("corruptedkey123..." :: PubKeyHash))
 
@@ -120,27 +120,27 @@ Each constructor targets a specific aspect of the transaction derived from the M
 
 - `CorruptMintedTokenName`
   - **Purpose:** Tests the validator's minting policy logic, specifically the validation of token names associated with state creation/deletion using `'OwnPolicy'`.
-  - **How it Works:** Takes the expected `GYTokenName` (usually derived from the `StateType` name) and a different, incorrect `GYTokenName`. It finds the minting operation in the transaction skeleton (`gytxMint`) corresponding to the validator's own minting policy and replaces the original token name with the corrupted one. It also performs the same replacement in the `GYValue` of the corresponding output UTxO (`gytxOuts`).
+  - **How it Works:** Takes the expected `GYTokenName` (derived from the `StateSpec`'s `Identifier`) and a different, incorrect `GYTokenName`. It finds the minting operation in the transaction skeleton (`gytxMint`) corresponding to the validator's own minting policy and replaces the original token name with the corrupted one. It also performs the same replacement in the `GYValue` of the corresponding output UTxO (`gytxOuts`).
   - **Expected Validator Behavior:** Reject the transaction because the minted/burned token name does not match the expected name derived from the state type or redeemer context.
 
 - `CorruptConstantField`
   - **Purpose:** Tests the validator's validation of fields set to constant values using `'SetTo'` with `'EnumValue'` or `'IntValue'`.
-  - **How it Works:** Takes the target `SStateType`, the `Proxy` of the field being set to a constant, and incorrect `Data`. It finds the output UTxO(s) corresponding to the `StateType` and replaces the value of the specified field in the datum with the incorrect `Data`.
+  - **How it Works:** Takes the target `SStateSpec`, the `Proxy` of the field being set to a constant, and incorrect `Data`. It finds the output UTxO(s) corresponding to the state type and replaces the value of the specified field in the datum with the incorrect `Data`.
   - **Expected Validator Behavior:** Reject the transaction because the datum field's value does not match the constant value expected by the validator logic for that action.
 
 - `CorruptCalculatedField`
   - **Purpose:** Tests the validator's validation of fields whose values are derived from other inputs or context (e.g., using `'StateFieldValue'`, `'CurrentTime'`, or arithmetic operations like `'AddValue'`).
-  - **How it Works:** Takes the target `SStateType` and a Haskell function (`GetStateData st -> GetStateData st`). It finds the output UTxO, decodes its datum, applies the provided function to corrupt the Haskell value, re-encodes it, and updates the output datum.
+  - **How it Works:** Takes the target `SStateSpec` and a Haskell function (`StateDatum st -> StateDatum st`). It finds the output UTxO, decodes its datum, applies the provided function to corrupt the Haskell value, re-encodes it, and updates the output datum.
   - **Expected Validator Behavior:** Reject the transaction because the calculated field's value in the output datum does not match the result the validator calculates based on transaction inputs and context.
 
 - `CorruptReferenceInput`
   - **Purpose:** Tests validator logic that relies on reading data from reference inputs (e.g., for signature checks via `MustBeSignedByState` or complex validation rules). It can also test instance consistency checks derived during compilation.
-  - **How it Works:** Takes the `SStateType` of the reference input UTxO to target and an incorrect `TxOutRef`. It finds the original `TxOutRef` corresponding to that state type in the skeleton's reference input set (`gytxRefIns`) and replaces it with the incorrect one.
+  - **How it Works:** Takes the `SStateSpec` of the reference input UTxO to target and an incorrect `TxOutRef`. It finds the original `TxOutRef` corresponding to that state type in the skeleton's reference input set (`gytxRefIns`) and replaces it with the incorrect one.
   - **Expected Validator Behavior:** Reject the transaction, either because the required datum cannot be found/decoded at the incorrect reference, or because instance consistency checks (comparing the referenced UTxO's address/origin) fail.
 
 - `CorruptConstraintOutput`
   - **Purpose:** Tests validator logic enforcing constraints that mandate specific outputs, such as `'MustAddToAggregateState'` or `'MustWithdrawFromAggregateState'`.
-  - **How it Works:** Takes the `SStateType` of the aggregate state involved in the constraint and a Haskell function (`GYValue -> GYValue`) to modify the value. It finds the output UTxO directed to the managing validator's address (which was created to satisfy the constraint) and applies the function to corrupt its `GYValue` (e.g., changing the amount paid to a treasury).
+  - **How it Works:** Takes the `SStateSpec` of the aggregate state involved in the constraint and a Haskell function (`GYValue -> GYValue`) to modify the value. It finds the output UTxO directed to the managing validator's address (which was created to satisfy the constraint) and applies the function to corrupt its `GYValue` (e.g., changing the amount paid to a treasury).
   - **Expected Validator Behavior:** Reject the transaction because the value in the output UTXO does not match the amount required by the constraint logic within the validator.
 
 ### `ActionMutationStrategy`
@@ -159,7 +159,7 @@ data ActionMutationStrategy app action = ActionMutationStrategy
 ```haskell
 let ownershipCorruption = ActionMutationStrategy
   [ CorruptPreservedFieldInRef 
-      (STypedTheOnlyInstance (SStateType @ServiceConfigState))
+      (STypedTheOnlyInstance (autoSingletonStateSpec @ServiceConfigState))
       (Proxy @"serviceConfigProvider")
       (toData ("maliciouskey..." :: PubKeyHash))
   ]
@@ -212,7 +212,7 @@ buildRefCorruptedTransaction ::
 -- Test that validator rejects transactions with corrupted owner field
 let strategy = ActionMutationStrategy
   [ CorruptPreservedFieldInRef 
-      (STypedTheOnlyInstance (SStateType @FeedConfigState))
+      (STypedTheOnlyInstance (autoSingletonStateSpec @FeedConfigState))
       (Proxy @"feedOwner")
       (toData ("maliciousowner..." :: PubKeyHash))
   ]
@@ -258,15 +258,15 @@ Top-level function to corrupt any field in a state type using Generic machinery.
 
 ```haskell
 corruptFieldGenerically ::
-  forall st.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GCorruptField (Rep (GetStateData st))
+  forall s.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GCorruptField (Rep (StateDatum s))
   ) =>
-  GetStateData st ->  -- Original state data
+  StateDatum s ->  -- Original state data
   String ->           -- Field name to corrupt
   Data ->             -- Corruption value
-  Either Text (GetStateData st) -- Corrupted state data
+  Either Text (StateDatum s) -- Corrupted state data
 ```
 
 **Example:**
@@ -321,7 +321,7 @@ testServiceProviderCorruption :: SAppInstance SubscriptionApp
 testServiceProviderCorruption appInstance params = do
   let strategy = ActionMutationStrategy
         [ CorruptPreservedFieldInRef 
-            (STypedTheOnlyInstance (SStateType @ServiceConfigState))
+            (STypedTheOnlyInstance (autoSingletonStateSpec @ServiceConfigState))
             (Proxy @"serviceConfigProvider")
             (toData ("maliciouskey0123456789abcdef0123456789abcdef01234567" :: PubKeyHash))
         ]

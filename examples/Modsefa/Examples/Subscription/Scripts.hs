@@ -22,23 +22,15 @@ to it, returning the final 'GYScript' ready for use in transaction building.
 
 module Modsefa.Examples.Subscription.Scripts () where
 
-import Data.Data ((:~:)(Refl))
-import Data.Proxy (Proxy)
-import Data.Typeable (Typeable, eqT)
+import Data.Typeable (eqT)
 
-import GeniusYield.Types (GYScript, scriptFromPlutus)
+import GeniusYield.Types (scriptFromPlutus)
 
-import Modsefa.Core.Foundation
-  ( Params, ParamsToValue, ValidatorPlutusVersion
-  , ValidatorSpec
-  )
-import Modsefa.Core.ValidatorScript (AppValidatorScripts(getValidatorScript))
+import Modsefa.CodeGen.Generation (generateAppValidatorScripts)
 
 import Modsefa.Examples.Subscription.Generated 
-  ( couponValidatorCompiledCode
-  , customerValidatorCompiledCode
-  , serviceAndPricingValidatorCompiledCode
-  , treasuryValidatorCompiledCode
+  ( couponValidatorCompiledCode, customerValidatorCompiledCode
+  , serviceAndPricingValidatorCompiledCode, treasuryValidatorCompiledCode
   )
 import Modsefa.Examples.Subscription.Spec (SubscriptionApp)
 import Modsefa.Examples.Subscription.Validators
@@ -51,31 +43,4 @@ import Modsefa.Examples.Subscription.Validators
 -- AppValidatorScripts Instance
 -- ============================================================================
 
--- | Instance connecting the 'SubscriptionApp' specification to its concrete validator script implementations.
-instance AppValidatorScripts SubscriptionApp where
-  -- | Retrieves the parameterized 'GYScript' for a given validator type 'v' within the 'SubscriptionApp'.
-  -- This function uses 'eqT' for type-safe dispatching at runtime based on the 'Proxy v'.
-  -- It looks up the correct compiled code function (e.g., 'serviceAndPricingValidatorCompiledCode')
-  -- and applies the provided 'params' ('ParamsToValue (Params v)') to it.
-  getValidatorScript :: forall v. (ValidatorSpec v, Typeable v) =>
-    Proxy v -- ^ Proxy identifying the requested validator type.
-    -> ParamsToValue (Params v) -- ^ The resolved value-level parameters for this validator instance.
-    -> GYScript (ValidatorPlutusVersion v) -- ^ The resulting parameterized Genius Yield script.
-  getValidatorScript _ params =
-    -- Check if the requested type 'v' matches ServiceAndPricingValidator
-    case eqT @v @ServiceAndPricingValidator of
-      Just Refl -> scriptFromPlutus $ serviceAndPricingValidatorCompiledCode params
-      Nothing ->
-        -- Check if 'v' matches CouponValidator
-        case eqT @v @CouponValidator of
-          Just Refl -> scriptFromPlutus $ couponValidatorCompiledCode params
-          Nothing ->
-            -- Check if 'v' matches CustomerValidator
-            case eqT @v @CustomerValidator of
-              Just Refl -> scriptFromPlutus $ customerValidatorCompiledCode params
-              Nothing ->
-                -- Check if 'v' matches TreasuryValidator
-                case eqT @v @TreasuryValidator of
-                  Just Refl -> scriptFromPlutus $ treasuryValidatorCompiledCode params
-                  -- If no match is found for any known validator in this app, raise an error.
-                  Nothing -> error "No script implementation for this validator"
+$(generateAppValidatorScripts @SubscriptionApp)

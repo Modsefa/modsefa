@@ -25,9 +25,6 @@ module Modsefa.Core.Transaction.Context
     -- * Transaction Building Context
   , TxBuilderContext(..)
   , TxBuilder(..)
-
-    -- * Type Aliases
-  , DerivationContext
   ) where
 
 import Control.Monad.IO.Class (MonadIO)
@@ -41,10 +38,6 @@ import PlutusLedgerApi.V3 (POSIXTime)
 
 import Modsefa.Core.Foundation.Types (SomeFieldValue, SomeStatedUTxO)
 
-
--- | Type alias for the map holding resolved derived parameter values ('ParamDerivation').
--- Keys are the derived parameter names ('Symbol'), values are 'SomeFieldValue'.
-type DerivationContext = Map Text SomeFieldValue
 
 -- | Existential wrapper for 'GYTxOut', hiding the Plutus version @pv@ but
 -- preserving the 'SingPlutusVersionI' constraint. Useful for storing outputs
@@ -74,7 +67,7 @@ data TxBuilderContext (pv :: PlutusVersion) = TxBuilderContext
   { tbcCurrentTime :: POSIXTime -- ^ The current on-chain time (lower bound of validity range), used for 'Modsefa.Core.Foundation.Types.CurrentTime'.
   , tbcLetResults :: Map Text (OperationResult pv) -- ^ Results of processed 'Modsefa.Core.Foundation.Types.Let' steps, keyed by label ('Symbol').
   , tbcResolvedRefs :: Map Text SomeStatedUTxO -- ^ Cache of resolved 'Modsefa.Core.Foundation.Types.TypedStateRef's (from 'Reference' ops), keyed by a representation of the 'SStateRef'.
-  , tbcResolvedFields :: Map Text SomeFieldValue -- ^ (Currently Unused?) Cache for resolved field values.
+  , tbcResolvedFields :: Map Text SomeFieldValue -- ^ Cache for resolved field values.
   } deriving (Generic, Show)
 
 -- | The monad transformer stack used for building transaction skeletons ('GYTxSkeleton').

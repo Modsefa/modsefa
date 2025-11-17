@@ -65,36 +65,34 @@ import GeniusYield.Types
   , redeemerFromPlutusData, scriptVersion, singPlutusVersion, utxoOutDatum, utxoRef
   , utxoValue, utxosToList, valueFromLovelace, valueSingleton, valueToList
   )
-import PlutusLedgerApi.V3 (Address, BuiltinData(..))
+import PlutusLedgerApi.V3 (Address, BuiltinData(..), FromData, ToData)
 import PlutusPrelude ((.~))
 import PlutusTx (fromBuiltinData, toBuiltinData, toData)
 
 import Modsefa.Core.Foundation
   ( ActionSpecParameters, ActionSpecSteps, ActionStep(..), AllStateTypesGeneric
-  , AppSpec(AppInstanceParameters, Validators), ExtractOpsFromActionSteps
-  , ExtractStateType, ExtractStateTypes, GExtractField, GetStateData, ParamsToValue
-  , PolicySource(ExternalPolicy, OwnPolicy), ResolveInstanceParamList
-  , SStateType(..), SomeFieldValue(..), SomeStatedUTxO(SomeStatedUTxO)
-  , StateIdentifier(AggregateAsset, TokenIdentified)
-  , StateRepresentable(stateIdentifier), TypedActionSpec, TypedOperation
-  , TypedPredicate
+  , AppSpec(AppInstanceParameters, Validators), DerivationContext
+  , ExtractOpsFromActionSteps, ExtractStateType, ExtractStateTypes, GExtractField
+  , ParamsToValue, ResolveInstanceParamList, SomeFieldValue(..)
+  , SomeStatedUTxO(SomeStatedUTxO), StateDatum, StateSpec, TypedActionSpec
+  , TypedOperation, TypedPredicate, TypedStateRef
   )
 import Modsefa.Core.Singletons
   ( AutoSingletonActionStep, AutoSingletonActionStepList, GBuildDatumFromSpecs(..)
   , SActionSpec(..), SActionStep(..), SActionStepList(..)
   , SAppInstance(SAppInstance), SAppSpec, SFieldSpec(SSetTo), SFieldSpecList(..)
   , SInstanceParams, SOperation(..), SParamTuple(STupleNil), SPredicate(..)
-  , SStateRef(..), STypedValue(..), SValidator, SomeStateType(SomeStateType)
-  , SomeValidator(SomeValidator), extractFieldFromReferencedUTxO
-  , extractParamByNameDirectWithProxy, extractStateFromRef
-  , findValidatorManagingState, getStateName, getValidatorNameFromSingleton
+  , SStateRef(..), SStateSpec(SStateSpec), STypedValue(..), SValidator
+  , SomeStateType(SomeStateType), SomeValidator(SomeValidator)
+  , extractFieldFromReferencedUTxO, extractParamByNameDirectWithProxy
+  , extractStateFromRef, extractStateTypeFromRef', findValidatorManagingState
+  , getOwnPolicyTokenDetails, getStateName, getValidatorNameFromSingleton
   , getValidatorParams
   )
 import Modsefa.Core.ValidatorScript (AppValidatorScripts(..))
 
 import Modsefa.Core.Transaction.Context
-  ( DerivationContext, OperationResult(..),  SomeGYTxOut(..), TxBuilder
-  , TxBuilderContext(..)
+  ( OperationResult(..),  SomeGYTxOut(..), TxBuilder, TxBuilderContext(..)
   )
 import Modsefa.Core.Transaction.Parameters
   ( Mappable(toMappedParamTuple), buildParamsToValue
@@ -110,34 +108,33 @@ import Modsefa.Core.Transaction.Utils
 -- 1. TYPE FAMILIES & CONSTRAINTS
 -- ============================================================================
 
--- | Extracts the element type from a list type.
+-- | (Internal) Extracts the element type from a list type.
 type family ListItem (list :: Type) :: Type where
   ListItem [a] = a
 
--- | Looks up the type of a parameter by name within a type-level parameter list.
+-- | (Internal) Looks up the type of a parameter by name within a type-level parameter list.
 type family LookupParamType (name :: Symbol) (params :: [(Symbol, Type)]) :: Type where
   LookupParamType name ('(name, t) ': _) = t
   LookupParamType name (_ ': rest) = LookupParamType name rest
   -- Note: Implicitly fails with type error if name not found.
 
--- | Constraint: Ensures all 'StateType's involved in a list of 'TypedOperation's
+-- | (Internal) Constraint: Ensures all 'StateSpec's involved in a list of 'TypedOperation's
 -- have 'Generic' instances and support generic datum building ('GBuildDatumFromSpecs').
 type family AllOperationsHaveGeneric (ops :: [TypedOperation]) :: Constraint where
   AllOperationsHaveGeneric '[] = ()
   AllOperationsHaveGeneric (op ': rest) =
-    ( Generic (GetStateData (ExtractStateType op))
-    , GBuildDatumFromSpecs (Rep (GetStateData (ExtractStateType op)))
+    ( Generic (StateDatum (ExtractStateType op))
+    , GBuildDatumFromSpecs (Rep (StateDatum (ExtractStateType op)))
     , AllOperationsHaveGeneric rest
     )
 
--- | Constraint: Ensures all 'StateType's involved in a list of 'TypedOperation's
--- have 'Generic' instances and support generic field extraction ('GExtractField'),
--- needed primarily for predicate evaluation.
+-- | (Internal) Constraint: Ensures all 'StateSpec's involved in a list of 'TypedOperation's
+-- have 'Generic' instances and support generic field extraction ('GExtractField').
 type family AllOperationsHaveRequiredInstances (ops :: [TypedOperation]) :: Constraint where
   AllOperationsHaveRequiredInstances '[] = ()
   AllOperationsHaveRequiredInstances (op ': rest) =
-    ( Generic (GetStateData (ExtractStateType op))
-    , GExtractField (Rep (GetStateData (ExtractStateType op)))
+    ( Generic (StateDatum (ExtractStateType op))
+    , GExtractField (Rep (StateDatum (ExtractStateType op)))
     , AllOperationsHaveRequiredInstances rest
     )
 
@@ -145,18 +142,18 @@ type family AllOperationsHaveRequiredInstances (ops :: [TypedOperation]) :: Cons
 -- 2. OPERATION LIST PROCESSING
 -- ============================================================================
 
--- | Type class defining the recursive processing logic for a list of 'ActionStep's.
+-- | (Internal) Type class defining the recursive processing logic for a list of 'ActionStep's.
 -- Instances handle empty lists, 'Op', 'Let', and 'Map' steps.
 class ( AllStateTypesGeneric (ExtractStateTypes (ExtractOpsFromActionSteps steps))
       , AppValidatorScripts app
       , SingPlutusVersionI pv
       , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
       , AutoSingletonActionStepList steps
-      ) => ProcessActionSteps app (action :: TypedActionSpec app) (steps :: [ActionStep]) (params :: [(Symbol, Type)]) pv where
-  -- | The internal processing function run within the 'TxBuilder' monad.
+      ) => ProcessActionSteps app (action :: TypedActionSpec) (steps :: [ActionStep]) (params :: [(Symbol, Type)]) pv where
+  --- | (Internal) The core processing function run within the 'TxBuilder' monad.
   processActionSteps' ::
     SAppSpec app ->
-    SActionSpec app action ->
+    SActionSpec action ->
     SActionStepList steps -> -- ^ Singleton for the steps being processed.
     SParamTuple params -> -- ^ Action parameters.
     [Text] -> -- ^ Action parameter names.
@@ -192,13 +189,14 @@ instance ( ProcessActionSteps app action rest params pv
         -- The recursive call is also now in the TxBuilder monad
         processActionSteps' appSpec' actionSpec restSteps allParams paramNames instanceParams' redeemerPolicy derivationContext networkId providers updatedSkeleton
 
--- | (Internal) Helper class to dispatch processing to the correct function based on the 'ActionStep' constructor ('Op', 'Let', 'Map').
--- This avoids needing overlapping instances directly in 'ProcessActionSteps'.
-class ProcessSingleActionStep app (action :: TypedActionSpec app) (step :: ActionStep) (params :: [(Symbol, Type)]) pv where
+-- | (Internal) Helper class to dispatch processing to the correct function based on the
+-- 'ActionStep' constructor ('Op', 'Let', 'Map').
+class ProcessSingleActionStep app (action :: TypedActionSpec) (step :: ActionStep) (params :: [(Symbol, Type)]) pv where
+  -- | (Internal) The core processing function for a single 'ActionStep'.
   processSingleActionStep' ::
     AllStateTypesGeneric (ExtractStateTypes (ExtractOpsFromActionSteps '[step])) =>
     SAppSpec app ->
-    SActionSpec app action ->
+    SActionSpec action ->
     SActionStep step ->
     SParamTuple params ->
     [Text] ->
@@ -213,17 +211,23 @@ class ProcessSingleActionStep app (action :: TypedActionSpec app) (step :: Actio
 -- | Instance for a normal 'Op' step.
 instance ( AppValidatorScripts app, SingPlutusVersionI pv
          , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-         , Generic (GetStateData (ExtractStateType op))
-         , GExtractField (Rep (GetStateData (ExtractStateType op)))
+         , Generic (StateDatum (ExtractStateType op))
+         , GExtractField (Rep (StateDatum (ExtractStateType op)))
+         , Show (StateDatum (ExtractStateType op))
+         , ToData (StateDatum (ExtractStateType op))
+         , FromData (StateDatum (ExtractStateType op))
          ) => ProcessSingleActionStep app action ('Op op) params pv where
   processSingleActionStep' = processSingleOp
 
 -- | Instance for processing a 'Let' step. Delegates to 'processSingleLet'.
 instance ( AppValidatorScripts app, SingPlutusVersionI pv
          , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-         , Generic (GetStateData (ExtractStateType op))
-         , GExtractField (Rep (GetStateData (ExtractStateType op)))
+         , Generic (StateDatum (ExtractStateType op))
+         , GExtractField (Rep (StateDatum (ExtractStateType op)))
          , KnownSymbol label
+         , Show (StateDatum (ExtractStateType op))
+         , ToData (StateDatum (ExtractStateType op))
+         , FromData (StateDatum (ExtractStateType op))
          ) => ProcessSingleActionStep app action ('Let label op) params pv where
   processSingleActionStep' = processSingleLet
 
@@ -232,8 +236,11 @@ instance ( AppValidatorScripts app, SingPlutusVersionI pv
          , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
          , KnownSymbol param
          , Mappable (ListItem (LookupParamType param (ActionSpecParameters action)))
-         , Generic (GetStateData (ExtractStateType op))
-         , GExtractField (Rep (GetStateData (ExtractStateType op)))
+         , Generic (StateDatum (ExtractStateType op))
+         , GExtractField (Rep (StateDatum (ExtractStateType op)))
+         , Show (StateDatum (ExtractStateType op))
+         , ToData (StateDatum (ExtractStateType op))
+         , FromData (StateDatum (ExtractStateType op))
          ) => ProcessSingleActionStep app action ('Map op param constraints) params pv where
   processSingleActionStep' = processSingleMap
 
@@ -245,7 +252,7 @@ processActionSteps :: forall app action steps params pv.
                    , ProcessActionSteps app action steps params pv
                    ) =>
   SAppSpec app ->
-  SActionSpec app action ->
+  SActionSpec action ->
   SParamTuple params ->
   [Text] ->
   SInstanceParams app ->
@@ -262,11 +269,14 @@ processSingleOp ::
   ( AllStateTypesGeneric (ExtractStateTypes '[op])
   , AppValidatorScripts app, SingPlutusVersionI pv
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-  , Generic (GetStateData (ExtractStateType op))
-  , GExtractField (Rep (GetStateData (ExtractStateType op)))
+  , Generic (StateDatum (ExtractStateType op))
+  , GExtractField (Rep (StateDatum (ExtractStateType op)))
+  , Show (StateDatum (ExtractStateType op))
+  , ToData (StateDatum (ExtractStateType op))
+  , FromData (StateDatum (ExtractStateType op))
   ) =>
   SAppSpec app ->
-  SActionSpec app action ->
+  SActionSpec action ->
   SActionStep ('Op op) ->
   SParamTuple params ->
   [Text] ->
@@ -280,20 +290,21 @@ processSingleOp ::
 processSingleOp appSpec' _ (SOp operation) params paramNames instanceParams' redeemerPolicy derivationContext networkId providers skeleton = do
   processOperationDirectly appSpec' operation params paramNames instanceParams' redeemerPolicy derivationContext networkId providers skeleton
 
--- | (Internal) Processes a single 'Let' step. It first processes the underlying operation,
--- then stores the result ('ORCreate' or 'ORReference') in the 'TxBuilderContext' ('tbcLetResults')
--- under the specified label.
+-- | (Internal) Processes a single 'Let' step.
 processSingleLet ::
   forall app action label op params pv.
   ( AllStateTypesGeneric (ExtractStateTypes '[op])
   , AppValidatorScripts app, SingPlutusVersionI pv
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-  , Generic (GetStateData (ExtractStateType op))
-  , GExtractField (Rep (GetStateData (ExtractStateType op)))
+  , Generic (StateDatum (ExtractStateType op))
+  , GExtractField (Rep (StateDatum (ExtractStateType op)))
+  , Show (StateDatum (ExtractStateType op))
+  , ToData (StateDatum (ExtractStateType op))
+  , FromData (StateDatum (ExtractStateType op))
   , KnownSymbol label
   ) =>
   SAppSpec app ->
-  SActionSpec app action ->
+  SActionSpec action ->
   SActionStep ('Let label op) ->
   SParamTuple params ->
   [Text] ->
@@ -336,19 +347,21 @@ processSingleLet appSpec' _ (SLet labelProxy operation) params paramNames instan
       return (Right newSkeleton)
 
 -- | (Internal) Processes a 'Map' step. Extracts the list parameter, then iterates
--- through the list, processing the inner operation ('processOperationDirectly') for each item.
--- Uses 'foldM' to accumulate skeleton changes across iterations.
+-- through the list, processing the inner operation for each item.
 processSingleMap :: forall app action op param constraints params pv.
   ( AllStateTypesGeneric (ExtractStateTypes '[op])
   , AppValidatorScripts app, SingPlutusVersionI pv
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
   , KnownSymbol param
   , Mappable (ListItem (LookupParamType param (ActionSpecParameters action)))
-  , Generic (GetStateData (ExtractStateType op))
-  , GExtractField (Rep (GetStateData (ExtractStateType op)))
+  , Generic (StateDatum (ExtractStateType op))
+  , GExtractField (Rep (StateDatum (ExtractStateType op)))
+  , Show (StateDatum (ExtractStateType op))
+  , ToData (StateDatum (ExtractStateType op))
+  , FromData (StateDatum (ExtractStateType op))
   ) =>
   SAppSpec app ->
-  SActionSpec app action ->
+  SActionSpec action ->
   SActionStep ('Map op param constraints) ->
   SParamTuple params ->
   [Text] ->
@@ -378,16 +391,18 @@ processSingleMap appSpec' _ (SMap innerOperation paramProxy _) allParams allPara
 -- 3. INDIVIDUAL OPERATION PROCESSING
 -- ============================================================================
 
--- | Processes a single 'SOperation' ('Create', 'Update', 'Delete', 'Reference'),
--- modifying the 'GYTxSkeleton' accordingly. Handles datum building, finding validators,
--- resolving parameters, creating inputs/outputs, and minting/burning tokens.
+-- | (Internal) Processes a single 'SOperation' ('Create', 'Update', 'Delete', 'Reference'),
+-- modifying the 'GYTxSkeleton' accordingly.
 processOperationDirectly ::
   forall app op params pv.
   ( AppValidatorScripts app
   , SingPlutusVersionI pv
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-  , Generic (GetStateData (ExtractStateType op))
-  , GExtractField (Rep (GetStateData (ExtractStateType op)))
+  , Generic (StateDatum (ExtractStateType op))
+  , GExtractField (Rep (StateDatum (ExtractStateType op)))
+  , Show (StateDatum (ExtractStateType op))
+  , ToData (StateDatum (ExtractStateType op))
+  , FromData (StateDatum (ExtractStateType op))
   ) =>
   SAppSpec app ->
   SOperation op ->
@@ -402,14 +417,14 @@ processOperationDirectly ::
   TxBuilder pv (Either Text (GYTxSkeleton pv)) -- ^ Updated skeleton or error.
 processOperationDirectly appSpec' operation params paramNames instanceParams' redeemerPolicy derivationContext networkId providers skeleton = case operation of
 
-  SCreate stateType fieldSpecs _constraints -> do
-    liftIO $ putStrLn $ "Processing Create for: " ++ show (getStateName stateType)
-    datumResult <- buildDatumFromFieldSpecs stateType fieldSpecs params paramNames derivationContext networkId providers
+  SCreate (spec :: SStateSpec s) fieldSpecs _constraints -> do
+    liftIO $ putStrLn $ "Processing Create for: " ++ show (getStateName spec)
+    datumResult <- buildDatumFromFieldSpecs spec fieldSpecs params paramNames derivationContext networkId providers
     case datumResult of
       Left err -> return $ Left err
       Right datum -> do
-        liftIO $ putStrLn $ "🎯 Final datum for " ++ show (getStateName stateType) ++ ": " ++ show datum
-        case findValidatorManagingState appSpec' (SomeStateType stateType) of
+        liftIO $ putStrLn $ "🎯 Final datum for " ++ show (getStateName spec) ++ ": " ++ show datum
+        case findValidatorManagingState appSpec' (SomeStateType spec) of
           Left err -> return $ Left $ "No validator found for state: " <> err
           Right (SomeValidator (validator :: SValidator v)) -> do
             let validatorName = getValidatorNameFromSingleton validator
@@ -431,18 +446,20 @@ processOperationDirectly appSpec' operation params paramNames instanceParams' re
                 scriptAddr <- liftIO $ runGYTxQueryMonadIO networkId providers $ scriptAddress script
                 case (spv, scriptVersion script) of
                   (SingPlutusV3, SingPlutusV3) -> do
-                    let (mintSkel, tokenValue) = case stateIdentifier stateType of
-                          TokenIdentified OwnPolicy stTokenName tokenQuantity -> do
-                            let policyId = mintingPolicyId script
-                            let token = valueSingleton (GYToken policyId stTokenName) tokenQuantity
-                            let buildPlutusScript :: GYBuildPlutusScript 'PlutusV3 = GYBuildPlutusScriptInlined script
-                            let buildScript = GYBuildPlutusScript buildPlutusScript
-                            let redeemer = case redeemerPolicy of
-                                  UseNamedRedeemer name -> redeemerFromPlutusData name
-                                  _ -> redeemerFromPlutusData ()
-                            let mint = mustMint buildScript redeemer stTokenName tokenQuantity
-                            (mint, token)
-                          _ -> (mempty, mempty)
+                    let (mintSkel, tokenValue) = case spec of
+                          SStateSpec _ idSing _ _ -> do
+                            case getOwnPolicyTokenDetails idSing of
+                              Just (stTokenName, tokenQuantity) ->    
+                                let policyId = mintingPolicyId script
+                                    token = valueSingleton (GYToken policyId stTokenName) tokenQuantity
+                                    buildPlutusScript :: GYBuildPlutusScript 'PlutusV3 = GYBuildPlutusScriptInlined script
+                                    buildScript = GYBuildPlutusScript buildPlutusScript
+                                    redeemer = case redeemerPolicy of
+                                      UseNamedRedeemer name -> redeemerFromPlutusData name
+                                      _ -> redeemerFromPlutusData ()
+                                    mint = mustMint buildScript redeemer stTokenName tokenQuantity
+                                in (mint, token)
+                              Nothing -> (mempty, mempty)
                     let outputValue = tokenValue
                     let gyDatum = datumFromPlutus' (BuiltinData (toData datum))
                     let baseOutput = mkGYTxOut scriptAddr outputValue gyDatum
@@ -451,14 +468,14 @@ processOperationDirectly appSpec' operation params paramNames instanceParams' re
                     return $ Right $ skeleton <> outputSkel <> mintSkel
                   _ -> return $ Left "Plutus version mismatch between transaction and validator script!"
 
-  SUpdate stateRef fieldSpecs _constraints -> do
+  SUpdate (stateRef :: SStateRef s ref) fieldSpecs _constraints -> do
     liftIO $ putStrLn $ "Processing Update for state reference: " ++ show stateRef
-    existingStateResult <- resolveStateRefSingleton (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
+    existingStateResult <- resolveStateRefSingleton @s (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
     case existingStateResult of
       Left err -> return $ Left err
       Right (existingUtxoRef, existingUtxo) -> do
         liftIO $ putStrLn $ "Found existing UTxO to update: " ++ show existingUtxoRef
-        let stateType = extractStateTypeFromRef stateRef
+        let stateType = extractStateTypeFromRef' stateRef
         existingDatumResult <- liftIO $ extractExistingDatum existingUtxo stateType
         case existingDatumResult of
           Left err -> return $ Left err
@@ -505,68 +522,74 @@ processOperationDirectly appSpec' operation params paramNames instanceParams' re
                             return $ Right $ skeleton <> spendInput <> outputSkel
                           _ -> return $ Left "Plutus version mismatch between transaction and validator script!"
 
-  SDelete stateRef _constraints -> do
+  SDelete (stateRef :: SStateRef s ref) _constraints -> do
     liftIO $ putStrLn $ "Processing Delete for: " ++ show (extractStateFromRef stateRef)
-    existingStateResult <- resolveStateRefSingleton (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
+    existingStateResult <- resolveStateRefSingleton @s (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
     case existingStateResult of
       Left err -> return $ Left err
       Right (existingUtxoRef, _existingUtxo) -> do
         liftIO $ putStrLn $ "Found UTxO to delete: " ++ show existingUtxoRef
-        let stateType = extractStateTypeFromRef stateRef
-        case findValidatorManagingState appSpec' (SomeStateType stateType) of
-          Left err -> return $ Left $ "No validator found for state: " <> err
-          Right (SomeValidator (validator :: SValidator v)) -> do
-            let validatorName = getValidatorNameFromSingleton validator
-            paramBuildResult <- case findParameterDerivationFor validatorName appSpec' of
-              Nothing -> return $ buildParamsToValue (getValidatorParams validator) params paramNames instanceParams' Nothing
-              Just derivation -> do
-                derivedParamsResult <- liftIO $ resolveValidatorParameters validatorName derivation (SAppInstance appSpec' instanceParams') networkId providers
-                case derivedParamsResult of
-                  Left err -> return $ Left err
-                  Right derivedParams -> return $ buildParamsToValue (getValidatorParams validator) params paramNames instanceParams' (Just derivedParams)
+        -- 1. Extract the spec using the existing function name
+        let spec = extractStateTypeFromRef' stateRef
 
-            case paramBuildResult of
-              Left paramErr -> return $ Left $ "Failed to resolve validator parameters for delete: " <> paramErr
-              Right validatorParams -> do
-                let script = getValidatorScript @app (Proxy @v) validatorParams
-                let spv = singPlutusVersion @pv
+        -- 2. Pattern match to get the identifier singleton
+        case spec of
+          SStateSpec _ idSing _ _ -> do
+             case findValidatorManagingState appSpec' (SomeStateType spec) of
+               Left err -> return $ Left $ "No validator found for state: " <> err
+               Right (SomeValidator (validator :: SValidator v)) -> do
+                 let validatorName = getValidatorNameFromSingleton validator
+                 paramBuildResult <- case findParameterDerivationFor validatorName appSpec' of
+                   Nothing -> return $ buildParamsToValue (getValidatorParams validator) params paramNames instanceParams' Nothing
+                   Just derivation -> do
+                     derivedParamsResult <- liftIO $ resolveValidatorParameters validatorName derivation (SAppInstance appSpec' instanceParams') networkId providers
+                     case derivedParamsResult of
+                       Left err -> return $ Left err
+                       Right derivedParams -> return $ buildParamsToValue (getValidatorParams validator) params paramNames instanceParams' (Just derivedParams)
 
-                case (spv, scriptVersion script) of
-                  (SingPlutusV3, SingPlutusV3) -> do
-                    let redeemer = case redeemerPolicy of
-                          UseNamedRedeemer name -> redeemerFromPlutusData name
-                          _ -> redeemerFromPlutusData ()
-                    let buildPlutusScript :: GYBuildPlutusScript 'PlutusV3 = GYBuildPlutusScriptInlined script
-                    let spendInput = mustHaveInput $ GYTxIn existingUtxoRef (GYTxInWitnessScript
-                          buildPlutusScript
-                          Nothing
-                          redeemer)
+                 case paramBuildResult of
+                   Left paramErr -> return $ Left $ "Failed to resolve validator parameters for delete: " <> paramErr
+                   Right validatorParams -> do
+                     let script = getValidatorScript @app (Proxy @v) validatorParams
+                     let spv = singPlutusVersion @pv
 
-                    let burnSkel = case stateIdentifier stateType of
-                          TokenIdentified OwnPolicy stTokenName tokenQuantity ->
-                            let burnQuantity = -tokenQuantity
-                            in mustMint (GYBuildPlutusScript buildPlutusScript) redeemer stTokenName burnQuantity
-                          _ -> mempty
-                          
-                    let cleanedSkeleton = case gytxRefIns skeleton of
-                          GYTxSkeletonRefIns refInsSet ->
-                            let newRefInsSet = delete existingUtxoRef refInsSet
-                            in skeleton { gytxRefIns = GYTxSkeletonRefIns newRefInsSet }
-                          GYTxSkeletonNoRefIns -> skeleton
+                     case (spv, scriptVersion script) of
+                       (SingPlutusV3, SingPlutusV3) -> do
+                         let redeemer = case redeemerPolicy of
+                               UseNamedRedeemer name -> redeemerFromPlutusData name
+                               _ -> redeemerFromPlutusData ()
+                         let buildPlutusScript :: GYBuildPlutusScript 'PlutusV3 = GYBuildPlutusScriptInlined script
+                         let spendInput = mustHaveInput $ GYTxIn existingUtxoRef (GYTxInWitnessScript
+                               buildPlutusScript
+                               Nothing
+                               redeemer)
 
-                    return $ Right $ cleanedSkeleton <> spendInput <> burnSkel
-                  _ -> return $ Left "Plutus version mismatch between transaction and validator script for Delete operation!"
+                         -- 3. Use the direct extraction helper to get token details for burning
+                         let burnSkel = case getOwnPolicyTokenDetails idSing of
+                               Just (stTokenName, tokenQuantity) ->
+                                 let burnQuantity = -tokenQuantity
+                                 in mustMint (GYBuildPlutusScript buildPlutusScript) redeemer stTokenName burnQuantity
+                               Nothing -> mempty
 
-  SReference stateRef _constraints -> do
+                         let cleanedSkeleton = case gytxRefIns skeleton of
+                               GYTxSkeletonRefIns refInsSet ->
+                                 let newRefInsSet = delete existingUtxoRef refInsSet
+                                 in skeleton { gytxRefIns = GYTxSkeletonRefIns newRefInsSet }
+                               GYTxSkeletonNoRefIns -> skeleton
+
+                         return $ Right $ cleanedSkeleton <> spendInput <> burnSkel
+                       _ -> return $ Left "Plutus version mismatch between transaction and validator script for Delete operation!"
+
+  SReference (stateRef :: SStateRef s ref) _constraints -> do
     liftIO $ putStrLn $ "Processing Reference for: " ++ show (extractStateFromRef stateRef)
-    refResult <- resolveStateRefSingleton (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
+    refResult <- resolveStateRefSingleton @s (SAppInstance appSpec' instanceParams') stateRef params paramNames networkId providers
     case refResult of
       Left err -> return $ Left err
       Right (utxoRef', utxo) -> do
         liftIO $ putStrLn $ "Found UTxO to reference: " ++ show utxoRef'
         ctx <- get
         let refKey = pack $ show stateRef
-        let statedUtxo = SomeStatedUTxO (extractStateTypeFromRef stateRef) utxo
+        let statedUtxo = SomeStatedUTxO (Proxy @s) utxo
         let updatedCtx = ctx { tbcResolvedRefs = insert refKey statedUtxo (tbcResolvedRefs ctx) }
         put updatedCtx
         let refSkel = mustHaveRefInput utxoRef'
@@ -576,22 +599,23 @@ processOperationDirectly appSpec' operation params paramNames instanceParams' re
 -- 4. DATUM BUILDING FUNCTIONS
 -- ============================================================================
 
--- | Builds a datum value ('GetStateData st') for a 'Create' operation using generics.
+-- | (Internal) Builds a datum value ('StateDatum st') for a 'Create' operation using generics.
 -- Iterates through the record fields and resolves each based on the 'SFieldSpecList'.
 buildDatumFromFieldSpecs ::
-  forall st fields params pv.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GBuildDatumFromSpecs (Rep (GetStateData st))
+  forall s fields params pv.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GBuildDatumFromSpecs (Rep (StateDatum s))
+  , Show (StateDatum s)
   ) =>
-  SStateType st ->
+  SStateSpec s ->
   SFieldSpecList fields ->
   SParamTuple params ->
   [Text] ->
   DerivationContext ->
   GYNetworkId ->
   GYProviders ->
-  TxBuilder pv (Either Text (GetStateData st))
+  TxBuilder pv (Either Text (StateDatum s))
 buildDatumFromFieldSpecs stateType fieldSpecs params actionParamNames derivationContext networkId providers = do
   liftIO $ putStrLn $ "Building datum for: " ++ show (getStateName stateType)
 
@@ -604,24 +628,23 @@ buildDatumFromFieldSpecs stateType fieldSpecs params actionParamNames derivation
       liftIO $ putStrLn $ "Datum build successful: " ++ show datum
       return $ Right datum
 
--- | Builds an updated datum value ('GetStateData st') for an 'Update' operation using generics.
--- Similar to 'buildDatumFromFieldSpecs' but takes the existing datum (as 'Maybe (Rep...)')
--- to handle 'Preserve' specifications.
+-- | (Internal) Builds an updated datum value ('StateDatum st') for an 'Update' operation using generics.
+-- Similar to 'buildDatumFromFieldSpecs' but takes the existing datum.
 buildUpdatedDatumFromFieldSpecs ::
-  forall st fields params pv.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GBuildDatumFromSpecs (Rep (GetStateData st))
+  forall s fields params pv.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GBuildDatumFromSpecs (Rep (StateDatum s))
   ) =>
-  SStateType st ->
+  SStateSpec s ->
   SFieldSpecList fields ->
   SParamTuple params ->
   [Text] ->
-  GetStateData st ->  -- ^ Existing datum value.
+  StateDatum s ->  -- ^ Existing datum value.
   DerivationContext ->
   GYNetworkId ->
   GYProviders ->
-  TxBuilder pv (Either Text (GetStateData st))
+  TxBuilder pv (Either Text (StateDatum s))
 buildUpdatedDatumFromFieldSpecs stateType fieldSpecs params actionParamNames existingDatum derivationContext networkId providers = do
   liftIO $ putStrLn $ "Building updated datum for: " ++ show (getStateName stateType)
 
@@ -641,17 +664,18 @@ buildUpdatedDatumFromFieldSpecs stateType fieldSpecs params actionParamNames exi
 -- Handles different reference strategies ('TypedTheOnlyInstance', 'TypedUniqueWhere', 'TypedByLabel', etc.).
 -- Queries the blockchain via 'GYProviders'.
 resolveStateRefSingleton ::
-  forall st ref app params pv.
-  ( StateRepresentable st
+  forall (s :: Type) (ref :: TypedStateRef s) app params pv.
+  ( StateSpec s
   , AppValidatorScripts app
   , AppSpec app
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
+  , Generic (StateDatum s)
+  , GExtractField (Rep (StateDatum s))
+  , FromData (StateDatum s)
   , SingPlutusVersionI pv
   ) =>
   SAppInstance app ->
-  SStateRef st ref ->
+  SStateRef s ref ->
   SParamTuple params -> -- ^ Action parameters (used for predicates).
   [Text] -> -- ^ Action parameter names.
   GYNetworkId ->
@@ -669,7 +693,7 @@ resolveStateRefSingleton appInstance stateRef params paramNames networkId provid
             _ -> return $ Left $ "Could not resolve 'Let' binding with label: " <> labelText
 
     _ -> liftIO $ do -- The rest of the logic remains in IO
-      case findValidatorManagingState appSpec' (SomeStateType (extractStateTypeFromRef stateRef)) of
+      case findValidatorManagingState appSpec' (SomeStateType (extractStateTypeFromRef' stateRef)) of
         Left err -> return $ Left err
         Right (SomeValidator (validator :: SValidator v)) -> do
           let validatorName = getValidatorNameFromSingleton validator
@@ -707,9 +731,16 @@ resolveStateRefSingleton appInstance stateRef params paramNames networkId provid
                     (utxo:_) -> return $ Right (utxoRef utxo, utxo) -- Return the first one found
                 _ -> return $ Left "This state reference type is not yet implemented for blockchain resolution"
 
-utxoMatchesPredicate :: (StateRepresentable st, Generic (GetStateData st), GExtractField (Rep (GetStateData st)))
-                     => SStateType st
-                     -> SPredicate (pred :: TypedPredicate st)
+-- | (Internal) Helper for 'resolveStateRefSingleton'.
+-- Evaluates a predicate against a UTxO's inline datum.
+utxoMatchesPredicate :: 
+                      ( StateSpec s
+                      , Generic (StateDatum s)
+                      , GExtractField (Rep (StateDatum s))
+                      , FromData (StateDatum s)
+                      )
+                     => SStateSpec s
+                     -> SPredicate (pred :: TypedPredicate s)
                      -> SParamTuple params
                      -> [Text] 
                      -> GYUTxO
@@ -724,20 +755,20 @@ utxoMatchesPredicate stateType predicate params paramNames utxo =
         _          -> return False
     _ -> return False
 
--- | (Internal) Resolves the unique instance of a state at a validator address.
--- Primarily uses the state's 'TokenIdentified' 'OwnPolicy' token if available.
+-- | (Internal) Helper for 'resolveStateRefSingleton'.
+-- Resolves the unique instance of a state at a validator address.
 resolveUniqueState ::
-  forall st.
-  StateRepresentable st =>
+  forall s.
+  StateSpec s =>
   GYAddress ->
-  SStateType st ->
+  SStateSpec s ->
   GYNetworkId ->
   GYProviders ->
   IO (Either Text (GYTxOutRef, GYUTxO))
-resolveUniqueState validatorAddr stateType networkId providers = do
-  case stateIdentifier stateType of
+resolveUniqueState validatorAddr (SStateSpec _ idSing _ _) networkId providers = do
+  case getOwnPolicyTokenDetails idSing of
     -- If identified by a unique token minted by this validator...
-    TokenIdentified OwnPolicy stTokenName _tokenQuantity -> do
+    Just (stTokenName, _tokenQuantity) -> do
       allUtxos <- runGYTxQueryMonadIO networkId providers $ utxosAtAddress validatorAddr Nothing
 
       let matchingUtxos = filter (hasToken stTokenName) (utxosToList allUtxos)
@@ -746,13 +777,12 @@ resolveUniqueState validatorAddr stateType networkId providers = do
         [] -> return $ Left $ "No UTxOs found with token: " <> pack (show stTokenName)
         _ -> return $ Left $ "Multiple UTxOs found with token: " <> pack (show stTokenName)
 
-    TokenIdentified (ExternalPolicy _) _ _ ->
-      return $ Left "External policy tokens not supported in refactored version"
+    Nothing ->
+      -- Fallback for states NOT identified by OwnPolicy tokens (e.g. AggregateAsset)
+      return $ Left "Cannot resolve unique instance: State is not identified by a unique OwnPolicy token."
 
-    AggregateAsset _ ->
-      return $ Left $ "Cannot resolve a unique instance for an AggregateAsset state type: " <> getStateName stateType
-
--- | (Internal) Checks if a UTxO's value contains a specific token name (with quantity > 0).
+-- | (Internal) Helper for 'resolveUniqueState'.
+-- Checks if a UTxO's value contains a specific token name.
 hasToken :: GYTokenName -> GYUTxO -> Bool
 hasToken targetTokenName utxo =
   let value = utxoValue utxo
@@ -764,29 +794,24 @@ hasToken targetTokenName utxo =
     checkToken (GYToken _ tokenName, quantity) = tokenName == targetTokenName && quantity > 0
     checkToken (GYLovelace, _) = False
 
--- | Extracts and parses the inline datum from a 'GYUTxO' into the expected state data type.
+-- | (Internal) Extracts and parses the inline datum from a 'GYUTxO'
+-- into the expected state data type.
 extractExistingDatum ::
-  forall st.
-  StateRepresentable st =>
+  forall s.
+  ( StateSpec s
+  , FromData (StateDatum s)
+  ) =>
   GYUTxO ->
-  SStateType st ->
-  IO (Either Text (GetStateData st))
-extractExistingDatum utxo (SStateType :: SStateType st) = do
+  SStateSpec s ->
+  IO (Either Text (StateDatum s))
+extractExistingDatum utxo _spec = do
   case utxoOutDatum utxo of
     GYOutDatumInline gyDatum -> do
       let builtinData = toBuiltinData gyDatum
-      case fromBuiltinData builtinData :: Maybe (GetStateData st) of
+      case fromBuiltinData builtinData :: Maybe (StateDatum s) of
         Just stateData -> return $ Right stateData
         Nothing -> return $ Left "Failed to parse existing state data"
     _ -> return $ Left "Existing UTxO does not have inline datum"
-
--- | Extracts the 'SStateType' singleton from an 'SStateRef'. (Duplicate from elsewhere, consider consolidating)
-extractStateTypeFromRef :: SStateRef st ref -> SStateType st
-extractStateTypeFromRef (STypedTheOnlyInstance stateType) = stateType
-extractStateTypeFromRef (STypedUniqueWhere stateType _) = stateType
-extractStateTypeFromRef (STypedAny stateType) = stateType
-extractStateTypeFromRef (STypedAnyWhere stateType _) = stateType
-extractStateTypeFromRef (STypedByLabel stateType _) = stateType
 
 -- | (Internal) Extracts the parameter names required by the inner operation of a 'Map' step.
 -- Used to correctly pass parameters derived from the mapped list item.

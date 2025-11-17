@@ -16,7 +16,6 @@ the environment ('withClientEnv') and querying state ('queryStateInstances').
 -}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -37,12 +36,13 @@ module Modsefa.Client.Types
 
 import Control.Exception (SomeException, try)
 import Data.Kind (Constraint, Type)
-import Data.Proxy (Proxy(Proxy))
-import Data.Type.Bool (If)
 import Data.Maybe (catMaybes)
+import Data.Proxy (Proxy(Proxy))
 import Data.String (fromString)
 import Data.Text (Text, pack, unpack)
 import Data.Time (UTCTime, getCurrentTime)
+import Data.Type.Bool (If)
+import Data.Typeable (Typeable, typeRep)
 import GHC.Stack (HasCallStack)
 import GHC.TypeLits (ErrorMessage(..), TypeError, symbolVal)
 
@@ -51,14 +51,15 @@ import GeniusYield.GYConfig
   )
 import GeniusYield.TxBuilder (GYTxQueryMonad(..), runGYTxQueryMonadIO, utxoDatum)
 import GeniusYield.Types
-    ( GYAddress, GYNetworkId, GYProviders, GYTxOutRef, GYUTxO(utxoValue, utxoRef)
-    , GYValue, utxosToList )
+  ( GYAddress, GYNetworkId, GYProviders, GYTxOutRef, GYUTxO(utxoRef, utxoValue)
+  , GYValue, utxosToList
+  )
 import PlutusLedgerApi.V3 (FromData, PubKeyHash)
 
 import Modsefa.Core.Foundation
-  ( AppSpec(Validators), GetStateData, GetStateName, InstanceType(SingleInstance)
-  , StateRepresentable, StateType, ValidatorDef(..)
-  , ValidatorSpec(ManagedStates, ValidatorAppName, ValidatorInstanceType)
+  ( AppSpec(Validators), InstanceType(SingleInstance), StateDatum, StateSpec
+  , ValidatorAppName, ValidatorDef(..)
+  , ValidatorSpec(ManagedStates, ValidatorInstanceType)
   )
 import Modsefa.Core.Singletons
   ( SAppInstance(SAppInstance), SAppSpec(..)
@@ -122,27 +123,26 @@ withClientEnv configPath logLabel action = do
 -- | A handle bundling all necessary client context into a single object.
 --   This represents a user's "session".
 data ModsefaClient = ModsefaClient
-  { mcEnv     :: !ClientEnv
-  , mcWallet  :: !Wallet
-  , mcSigners :: ![(PubKeyHash, SigningMethod)]
+  { mcEnv     :: !ClientEnv -- ^ The read-only client environment (providers, network).
+  , mcWallet  :: !Wallet -- ^ The user's wallet (for balancing, change, collateral).
+  , mcSigners :: ![(PubKeyHash, SigningMethod)] -- ^ Available signing methods (local keys, etc.).
   }
 
 -- ============================================================================
 -- * State Representation
 -- ============================================================================
 
--- | Represents a concrete instance of a specific 'StateType' found on the blockchain.
--- It bundles the UTxO reference, the parsed datum, the value held in the UTxO,
--- and a timestamp indicating when the query occurred.
-data StateInstance (st :: StateType) = StateInstance
+-- | Represents a concrete instance of a specific state found on the blockchain.
+-- Parameterized by the state tag 's :: Type'.
+data StateInstance (s :: Type) = StateInstance
   { siUtxoRef :: GYTxOutRef -- ^ The 'GYTxOutRef' identifying the UTxO holding this state instance.
-  , siData :: GetStateData st -- ^ The actual parsed Haskell datum value (e.g., 'ServiceConfig').
+  , siData :: StateDatum s -- ^ The actual parsed Haskell datum value (e.g., 'ServiceConfig').
   , siValue :: GYValue -- ^ The 'GYValue' contained within the UTxO (assets and amounts).
   , siTimestamp :: UTCTime -- ^ Timestamp indicating when this state instance was queried.
   }
 
 -- | Show instance for 'StateInstance'.
-instance (Show (GetStateData st)) => Show (StateInstance st) where
+instance (Show (StateDatum st)) => Show (StateInstance st) where
   show (StateInstance ref dat val time) =
     "StateInstance { siUtxoRef = " <> show ref <>
     ", siData = " <> show dat <>
@@ -150,15 +150,14 @@ instance (Show (GetStateData st)) => Show (StateInstance st) where
     ", siTimestamp = " <> show time <> " }"
 
 -- | Eq instance for 'StateInstance'.
-instance (Eq (GetStateData st)) => Eq (StateInstance st) where
+instance (Eq (StateDatum st)) => Eq (StateInstance st) where
   (StateInstance ref1 dat1 val1 time1) == (StateInstance ref2 dat2 val2 time2) =
     ref1 == ref2 && dat1 == dat2 && val1 == val2 && time1 == time2
 
--- | Existential wrapper for 'StateInstance'. Allows storing instances of different
--- 'StateType's together, hiding the specific type @st@ while preserving the
--- 'StateRepresentable' constraint.
+-- | Existential wrapper for 'StateInstance'.
+-- Hides the specific type 's' while preserving the 'StateSpec' constraint.
 data SomeStateInstance where
-  SomeStateInstance :: StateRepresentable st => StateInstance st -> SomeStateInstance
+  SomeStateInstance :: (StateSpec s) => StateInstance s -> SomeStateInstance
 
 -- | Show instance for 'SomeStateInstance'. Shows minimal identifying information.
 instance Show SomeStateInstance where
@@ -166,31 +165,51 @@ instance Show SomeStateInstance where
     "SomeStateInstance(" <> show ref <> " at " <> show time <> ")"
 
 -- ============================================================================
--- Type Family for State-in-App Validation
--- ============================================================================
-
--- | Type-level constraint: Checks if a 'StateType' @st@ is managed by any validator
--- within the 'AppSpec' @app@. Produces a 'TypeError' if the state is not found.
--- Used in the signature of 'queryStateInstances' to provide compile-time safety.
-type family StateInApp (st :: StateType) (app :: Type) :: Constraint where
-  StateInApp st app = StateInAppValidators st (Validators app)
-
--- | (Internal) Helper for 'StateInApp': Recursively checks the list of 'ValidatorDef's.
-type family StateInAppValidators (st :: StateType) (validators :: [ValidatorDef]) :: Constraint where
-  StateInAppValidators st '[] = TypeError ('Text "State " ':<>: 'ShowType st ':<>: 'Text " not found in any validator's ManagedStates within the AppSpec.")
-  StateInAppValidators st ('Validator v ': rest) =
-    If (StateInValidatorStates st (ManagedStates v))
-       (() :: Constraint)
-       (StateInAppValidators st rest)
-
--- | (Internal) Helper for 'StateInAppValidators': Checks if a 'StateType' @st@ exists in a list of states.
-type family StateInValidatorStates (st :: StateType) (states :: [StateType]) :: Bool where
-  StateInValidatorStates st '[] = 'False
-  StateInValidatorStates st (st ': rest) = 'True
-  StateInValidatorStates st (other ': rest) = StateInValidatorStates st rest
-
--- ============================================================================
 -- * Query Functions
+-- ============================================================================
+
+-- | Queries the blockchain for all instances of a specific 'StateSpec' @st@ belonging
+-- to a given application instance.
+--
+-- This function:
+-- 1. Finds the validator responsible for managing the state type @st@.
+-- 2. Determines the on-chain address for that validator (currently only supports single-instance validators).
+-- 3. Queries all UTxOs at that address.
+-- 4. Attempts to parse the datum of each UTxO as the Haskell type corresponding to @st@ ('StateDatum st').
+-- 5. Returns a list of 'StateInstance's for all successfully parsed UTxOs.
+--
+-- The 'StateInApp' constraint ensures at compile time that the requested state type
+-- is actually part of the specified application, preventing invalid queries.
+queryStateInstances :: forall s app.
+                     ( StateSpec s
+                     , Typeable s
+                     , FromData (StateDatum s) -- Constraint: Datum type must be deserializable.
+                     , AppSpec app -- Constraint: App type must have an AppSpec.
+                     , AppValidatorScripts app -- Constraint: App must provide script implementations.
+                     , StateInApp s app -- Constraint: State must belong to the app (compile-time check).
+                     )
+                  => Proxy s -- ^ Proxy indicating the type to query for.
+                  -> ClientEnv -- ^ The client environment.
+                  -> SAppInstance app -- ^ The application instance query context.
+                  -> IO [StateInstance s] -- ^ List of found and parsed state instances.
+queryStateInstances proxy clientEnv appInstance = do
+  let SAppInstance appSpec' _instanceParams = appInstance
+  let networkId' = ceNetworkId clientEnv
+  let providers  = ceProviders clientEnv
+  -- Get the State Tag name from its type
+  let stateTypeName = pack $ show $ typeRep (Proxy @s)
+
+  -- Find the validator managing this state by name.
+  case findValidatorManagingStateName appSpec' stateTypeName of
+    Nothing -> return []  
+    Just someValidator -> do
+      -- Get all UTxOs managed by this validator.
+      utxos <- getUtxosFromSomeValidator someValidator clientEnv appInstance
+      -- Parse the UTxOs into StateInstances of the target type 'st'.
+      parseStateInstances proxy utxos providers networkId'
+
+-- ============================================================================
+-- * Internal Helpers
 -- ============================================================================
 
 -- | Retrieves the script address ('GYAddress') for a specific single-instance validator
@@ -240,13 +259,13 @@ getValidatorUtxos proxy clientEnv appInstance = do
           return $ Right $ utxosToList utxos
 
 -- | Parses a list of 'GYUTxO's, attempting to decode their datums into the specified
--- 'StateType' @st@. Returns a list of successfully parsed 'StateInstance's.
-parseStateInstances :: forall st. (StateRepresentable st, FromData (GetStateData st))
-                   => Proxy st -- ^ Proxy for the target 'StateType'.
+-- state type 's'. Returns a list of successfully parsed 'StateInstance's.
+parseStateInstances :: forall s. (StateSpec s, FromData (StateDatum s))
+                   => Proxy s  -- ^ Proxy for the target 'StateSpec'.
                    -> [GYUTxO] -- ^ List of UTxOs to parse.
                    -> GYProviders
                    -> GYNetworkId
-                   -> IO [StateInstance st] -- ^ List of successfully parsed instances.
+                   -> IO [StateInstance s] -- ^ List of successfully parsed instances.
 parseStateInstances _proxy utxos providers networkId' = do
   currentTime <- getCurrentTime
 
@@ -330,41 +349,25 @@ getUtxosFromSomeValidator (SomeValidator (validator :: SValidator v)) clientEnv 
       -- TODO: Implement multi-instance UTXO querying if needed.
       return []
 
--- | Queries the blockchain for all instances of a specific 'StateType' @st@ belonging
--- to a given application instance.
---
--- This function:
--- 1. Finds the validator responsible for managing the state type @st@.
--- 2. Determines the on-chain address for that validator (currently only supports single-instance validators).
--- 3. Queries all UTxOs at that address.
--- 4. Attempts to parse the datum of each UTxO as the Haskell type corresponding to @st@ ('GetStateData st').
--- 5. Returns a list of 'StateInstance's for all successfully parsed UTxOs.
---
--- The 'StateInApp' constraint ensures at compile time that the requested state type
--- is actually part of the specified application, preventing invalid queries.
-queryStateInstances :: forall st app.
-                     ( StateRepresentable st -- Constraint: State must be representable on-chain.
-                     , FromData (GetStateData st) -- Constraint: Datum type must be deserializable.
-                     , AppSpec app -- Constraint: App type must have an AppSpec.
-                     , AppValidatorScripts app -- Constraint: App must provide script implementations.
-                     , StateInApp st app -- Constraint: State must belong to the app (compile-time check).
-                     )
-                  => Proxy st -- ^ Proxy indicating the 'StateType' to query for.
-                  -> ClientEnv -- ^ The client environment.
-                  -> SAppInstance app -- ^ The application instance query context.
-                  -> IO [StateInstance st] -- ^ List of found and parsed state instances.
-queryStateInstances proxy clientEnv appInstance = do
-  let SAppInstance appSpec' _instanceParams = appInstance
-  let networkId' = ceNetworkId clientEnv
-  let providers  = ceProviders clientEnv
-  -- Get the name of the state type from the proxy.
-  let stateTypeName = pack $ symbolVal (Proxy @(GetStateName st))
+-- ============================================================================
+-- Type Family for State-in-App Validation
+-- ============================================================================
 
-  -- Find the validator managing this state by name.
-  case findValidatorManagingStateName appSpec' stateTypeName of
-    Nothing -> return []  
-    Just someValidator -> do
-      -- Get all UTxOs managed by this validator.
-      utxos <- getUtxosFromSomeValidator someValidator clientEnv appInstance
-      -- Parse the UTxOs into StateInstances of the target type 'st'.
-      parseStateInstances proxy utxos providers networkId'
+-- | Type-level constraint: Checks if a state tag 's' is managed by any validator
+-- within the 'AppSpec' @app@.
+type family StateInApp (s :: Type) (app :: Type) :: Constraint where
+  StateInApp s app = StateInAppValidators s (Validators app)
+
+-- | (Internal) Helper for 'StateInApp': Recursively checks the list of 'ValidatorDef's.
+type family StateInAppValidators (s :: Type) (validators :: [ValidatorDef]) :: Constraint where
+  StateInAppValidators s '[] = TypeError ('Text "State " ':<>: 'ShowType s ':<>: 'Text " not found in any validator's ManagedStates within the AppSpec.")
+  StateInAppValidators s ('Validator v ': rest) =
+    If (StateInValidatorStates s (ManagedStates v))
+       (() :: Constraint)
+       (StateInAppValidators s rest)
+
+-- | (Internal) Helper for 'StateInAppValidators': Checks if a state tag 's' exists in a list of tags.
+type family StateInValidatorStates (s :: Type) (states :: [Type]) :: Bool where
+  StateInValidatorStates s '[] = 'False
+  StateInValidatorStates s (s ': rest) = 'True
+  StateInValidatorStates s (other ': rest) = StateInValidatorStates s rest

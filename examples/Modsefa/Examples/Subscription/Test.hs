@@ -74,9 +74,10 @@ import Modsefa.Client
   , getPkhFromSKeyFile, gyTxOutRefToV3, loadModsefaClient, queryAndPrintState
   , queryStateInstances, runAction, withClientEnv, (+:), pattern End
   )
-import Modsefa.Core.Foundation (SStateType(SStateType))
 import Modsefa.Core.IR.Compiler (compileIR)
-import Modsefa.Core.Singletons(SStateRef(STypedTheOnlyInstance), autoSingletonFull)
+import Modsefa.Core.Singletons
+  ( SStateRef(STypedTheOnlyInstance), autoSingletonFull, autoSingletonStateSpec
+  )
 import Modsefa.Test.Harness (handleResult, runScenario)
 import Modsefa.Test.RefAwareMutation
   ( ActionMutation(..), ActionMutationStrategy(..), buildRefCorruptedTransaction
@@ -85,6 +86,9 @@ import Modsefa.Test.RefAwareMutation
 import Modsefa.Examples.Subscription.Client
   ( appInstanceBootstrapRef, mkSubscriptionAppInstance
   )
+import Modsefa.Examples.Subscription.Generated.Datums
+  ( Coupon(..), CustomerSubscription(..), ServiceConfig(serviceConfigName)
+  )
 import Modsefa.Examples.Subscription.Scripts ()
 import Modsefa.Examples.Subscription.Spec
   ( BatchCreateCouponsSpec, BatchDeleteCouponsSpec, CreatePricingTierSpec
@@ -92,8 +96,7 @@ import Modsefa.Examples.Subscription.Spec
   , UpdateServiceConfigSpec, UpdateServiceProviderSpec, WithdrawTreasurySpec
   )
 import Modsefa.Examples.Subscription.Types
-  ( Coupon(..), CouponState, CustomerSubscription(..), CustomerSubscriptionState
-  , PricingTierState, ServiceConfig(serviceConfigName), ServiceConfigState
+  ( CouponState, CustomerSubscriptionState, PricingTierState, ServiceConfigState
   , TreasuryAdaState
   )
 
@@ -585,7 +588,7 @@ runSubscriptionCorruptedSubscribeTest txHashStr txIndex = do
             strategy = ActionMutationStrategy
               { mutations =
                   [ CorruptCalculatedField
-                      (SStateType @CustomerSubscriptionState) -- Target CustomerSubscription outputs
+                      (autoSingletonStateSpec @CustomerSubscriptionState) -- Target CustomerSubscription outputs
                       -- This function corrupts the datum after it's correctly calculated
                       (\cs -> cs { customerSubscriptionPrice = 0 })
                   ]
@@ -694,7 +697,7 @@ runSubscriptionCorruptedInstanceRefTest txHashA idxA txHashB idxB = do
                 strategy = ActionMutationStrategy
                   { mutations =
                       [ CorruptReferenceInput
-                          (SStateType @PricingTierState)
+                          (autoSingletonStateSpec @PricingTierState)
                           incorrectTierRefV3
                       ]
                   , description = "Replace PricingTier ref input with one from different instance"
@@ -777,7 +780,7 @@ runSubscriptionCorruptedPaymentTest txHashStr txIndex = do
             strategy = ActionMutationStrategy
               { mutations =
                   [ CorruptConstraintOutput
-                      (SStateType @TreasuryAdaState) -- Target the Treasury output
+                      (autoSingletonStateSpec @TreasuryAdaState) -- Target the Treasury output
                       -- Function to replace the correct value with 1 lovelace
                       (\_ -> valueFromLovelace 1)
                   ]
@@ -867,7 +870,7 @@ runSubscriptionCorruptProviderUpdateTest txHashStr txIndex = do
             strategy = ActionMutationStrategy
               { mutations =
                   [ CorruptPreservedFieldInRef
-                      (STypedTheOnlyInstance (SStateType @ServiceConfigState)) -- Target the unique ServiceConfig state
+                      (STypedTheOnlyInstance (autoSingletonStateSpec @ServiceConfigState)) -- Target the unique ServiceConfig state
                       (Proxy @"serviceConfigProvider") -- Target the field that should be preserved
                       (toData corruptPkh) -- Corrupting value
                   ]

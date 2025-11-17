@@ -19,7 +19,7 @@ class (KnownSymbol (ValidatorAppName v)) => ValidatorSpec (v :: Type) where
   type Params v :: [(Symbol, Type)]
 
   -- | State types managed by this validator
-  type ManagedStates v :: [StateType]
+  type ManagedStates v :: [Type]
 
   -- | Symbolic name of this validator
   type ValidatorAppName v :: Symbol
@@ -53,10 +53,10 @@ type Params FeedValidator =
 
 ### `ManagedStates`
 
-This declares the complete list of `StateType`s that this validator is responsible for managing. The Modsefa framework ensures at compile-time that any action attempting to operate on one of these states is correctly routed to this validator.
+This declares the complete list of types with `StateSpec` instances that this validator is responsible for managing. The Modsefa framework ensures at compile-time that any action attempting to operate on one of these states is correctly routed to this validator.
 
-- **Type:** `[StateType]` - A list of `StateType` definitions
-- **Purpose:** To explicitly associate on-chain state representations with the validator that governs their logic
+- **Type:** `[Type]` - A list of state tag types (e.g., `FeedConfigState`).
+- **Purpose:** To explicitly associate state specifications (defined by `StateSpec` instances for those tag types) with the validator that governs their logic.
 
 **Example:**
 

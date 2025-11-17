@@ -31,10 +31,11 @@ actions, parameters, etc.).
 --   3. Collection Operations & Utilities
 --   4. Parameter Type Resolution
 --   5. Validation Type Families
---   6. Predicate Type Families
 module Modsefa.Core.Foundation.TypeFamilies
   ( -- * State Type Analysis
     ExtractStateType
+  , ExtractStateFromRef
+  , ExtractStateFromConstraint
     
     -- * Action Analysis
   , ActionSpecName
@@ -51,76 +52,99 @@ module Modsefa.Core.Foundation.TypeFamilies
     -- * Parameter Resolution
   , ParamsToValue
   , ResolveInstanceParamList
-  , LookupValidatorParamType
+  , FindParamInValidatorList
+  , LookupParamInList
     
     -- * Validation Helpers
   , AllStateTypesGeneric
-  , ExtractPlutusVersion
+  , AllManagedStates
   , ExtractPlutusVersionFromValidators
+  , MaybeStateDatumConstraints
   ) where
 
 import Data.Kind (Constraint, Type)
 import Data.Type.Bool (If)
 import Data.Type.Equality (type (==))
-import GHC.Generics (Generic, K1, M1, Meta(MetaSel), S, (:*:))
+import GHC.Generics (Generic)
 import GHC.TypeLits (ErrorMessage(..), Symbol, TypeError)
 
 import GeniusYield.Types (PlutusVersion)
 
 import Modsefa.Core.Foundation.Types
-  ( ActionStep(..), AppSpec(Validators), GetStateData, StateType(..)
-  , TypedActionSpec(..), TypedConstraint, TypedOperation(..), TypedStateRef
-  , ValidatorDef(..), ValidatorSpec(..)
+  ( ActionStep(..), StateDatum, StateDatumConstraints, TypedActionSpec(..)
+  , TypedConstraint(..), TypedOperation(..), TypedStateRef(..)
   )
+import Modsefa.Core.Foundation.Validator (ValidatorDef(..), ValidatorSpec(..))
 
 
 -- ============================================================================
 -- 1. STATE TYPE ANALYSIS
 -- ============================================================================
 
--- | Extracts the target 'StateType' from a 'TypedOperation'.
--- Useful for determining which state an operation acts upon.
-type family ExtractStateType (op :: TypedOperation) :: StateType where
-  ExtractStateType ('Create @(ST name record) _ _) = ST name record
-  ExtractStateType ('Update ref _ _) = ExtractStateTypeFromRef ref
-  ExtractStateType ('Delete ref _) = ExtractStateTypeFromRef ref  
-  ExtractStateType ('Reference ref _) = ExtractStateTypeFromRef ref
+-- | Extracts the target state tag ('Type') from a 'TypedOperation'.
+type family ExtractStateType (op :: TypedOperation) :: Type where
+  ExtractStateType ('Create @s _ _) = s
+  ExtractStateType ('Update ref _ _) = ExtractStateFromRef ref
+  ExtractStateType ('Delete ref _) = ExtractStateFromRef ref  
+  ExtractStateType ('Reference ref _) = ExtractStateFromRef ref
 
--- | Extracts the 'StateType' associated with a 'TypedStateRef'.
-type family ExtractStateTypeFromRef (ref :: TypedStateRef st) :: StateType where
-  ExtractStateTypeFromRef (ref :: TypedStateRef st) = st
+-- | Type family to extract the state type 's' from a 'TypedStateRef s'.
+type family ExtractStateFromRef (ref :: TypedStateRef s) :: Type where
+  ExtractStateFromRef (ref :: TypedStateRef s) = s
+
+-- | Type family to safely extract the state type ('Maybe Type')
+-- | referenced by a 'TypedConstraint'.
+type family ExtractStateFromConstraint (c :: TypedConstraint) :: Maybe Type where
+  -- Constraints *with* a state
+  ExtractStateFromConstraint ('MustBeSignedByState ref _)     = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('PreserveStateField ref _)     = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('RequireStateValue ref _ _)   = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('MustExist ref)                 = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('MustNotExist ref)               = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('ExactlyN _ ref)                = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('AtLeastN _ ref)                = 'Just (ExtractStateFromRef ref)
+  ExtractStateFromConstraint ('AtMostN _ ref)                = 'Just (ExtractStateFromRef ref)
+  
+  -- Constraints *without* a state (or with states handled differently)
+  ExtractStateFromConstraint ('MustSpendParam _)                = 'Nothing
+  ExtractStateFromConstraint ('MustBeSignedByParam _)           = 'Nothing
+  ExtractStateFromConstraint ('MustSpendActionParam _)          = 'Nothing
+  ExtractStateFromConstraint ('MustSpendValidatorParam _ _)     = 'Nothing
+  ExtractStateFromConstraint ('MustBeSignedByValidatorParam _ _) = 'Nothing
+  ExtractStateFromConstraint ('MustAddToAggregateState _ _)     = 'Nothing
+  ExtractStateFromConstraint ('MustWithdrawFromAggregateState _ _ _) = 'Nothing
 
 -- ============================================================================
 -- 2. ACTION SPECIFICATION ANALYSIS
 -- ============================================================================
 
 -- | Extracts the action name ('Symbol') from a 'TypedActionSpec'.
-type family ActionSpecName (spec :: TypedActionSpec app) :: Symbol where
+type family ActionSpecName (spec :: TypedActionSpec) :: Symbol where
   ActionSpecName ('ActionSpec name _ _ _) = name
 
 -- | Extracts the list of 'ActionStep's from a 'TypedActionSpec'.
-type family ActionSpecSteps (spec :: TypedActionSpec app) :: [ActionStep] where
+type family ActionSpecSteps (spec :: TypedActionSpec) :: [ActionStep] where
   ActionSpecSteps ('ActionSpec _ steps _ _) = steps
 
 -- | Extracts the list of 'TypedConstraint's from a 'TypedActionSpec'.
-type family ActionSpecConstraints (spec :: TypedActionSpec app) :: [TypedConstraint] where
+type family ActionSpecConstraints (spec :: TypedActionSpec) :: [TypedConstraint] where
   ActionSpecConstraints ('ActionSpec _ _ constraints _) = constraints
 
 -- | Extracts the parameter list (@[(Symbol, Type)]@) from a 'TypedActionSpec'.
-type family ActionSpecParameters (spec :: TypedActionSpec app) :: [(Symbol, Type)] where
+type family ActionSpecParameters (spec :: TypedActionSpec) :: [(Symbol, Type)] where
   ActionSpecParameters ('ActionSpec _ _ _ params) = params
 
 -- ============================================================================
 -- 3. COLLECTION OPERATIONS & UTILITIES
 -- ============================================================================
 
--- | Type-level list concatenation, specifically for 'StateType' lists.
-type family ConcatStateLists (states1 :: [StateType]) (states2 :: [StateType]) :: [StateType] where
-  ConcatStateLists '[] states2 = states2
-  ConcatStateLists (st ': rest) states2 = st ': ConcatStateLists rest states2
+-- | Type-level list concatenation. Poly-kinded to work with '[Type].
+type family ConcatStateLists (list1 :: [k]) (list2 :: [k]) :: [k] where
+  ConcatStateLists '[] list2 = list2
+  ConcatStateLists (x ': xs) list2 = x ': ConcatStateLists xs list2
 
--- | Collects all 'ManagedStates' from a list of 'ValidatorDef's defined in an 'AppSpec'.
-type family AllManagedStates (validators :: [ValidatorDef]) :: [StateType] where
+-- | Collects all 'ManagedStates' from a list of 'ValidatorDef's..
+type family AllManagedStates (validators :: [ValidatorDef]) :: [Type] where
   AllManagedStates '[] = '[]
   AllManagedStates ('Validator v ': rest) = ConcatStateLists (ManagedStates v) (AllManagedStates rest)
 
@@ -131,22 +155,17 @@ type family ExtractOpsFromActionSteps (steps :: [ActionStep]) :: [TypedOperation
   ExtractOpsFromActionSteps ('Let _ op ': rest) = op ': ExtractOpsFromActionSteps rest
   ExtractOpsFromActionSteps ('Map op _ _ ': rest) = op ': ExtractOpsFromActionSteps rest
 
--- | Extracts the list of 'TypedActionSpec's from an application's 'ActionTransitions'.
-type family ExtractActionSpecs (transitions :: [(TypedActionSpec app, Symbol, Symbol)]) :: [TypedActionSpec app] where
-  ExtractActionSpecs '[] = '[]
-  ExtractActionSpecs ('(spec, _, _) ': rest) = spec ': ExtractActionSpecs rest
-
--- | Extracts the target 'StateType' for each operation in a list of 'TypedOperation's.
-type family ExtractStateTypes (ops :: [TypedOperation]) :: [StateType] where
+-- | Extracts the target state tag for each operation in a list.
+type family ExtractStateTypes (ops :: [TypedOperation]) :: [Type] where
   ExtractStateTypes '[] = '[]
   ExtractStateTypes (op ': rest) = ExtractStateType op ': ExtractStateTypes rest
 
 -- | Extracts all 'TypedOperation's contained within a single 'TypedActionSpec'.
-type family ExtractOpsFromAction (action :: TypedActionSpec app) :: [TypedOperation] where
+type family ExtractOpsFromAction (action :: TypedActionSpec) :: [TypedOperation] where
   ExtractOpsFromAction ('ActionSpec _ steps _ _) = ExtractOpsFromActionSteps steps
 
 -- | Extracts all top-level 'TypedConstraint's from a single 'TypedActionSpec'.
-type family ExtractConstraintsFromAction (action :: TypedActionSpec app) :: [TypedConstraint] where
+type family ExtractConstraintsFromAction (action :: TypedActionSpec) :: [TypedConstraint] where
   ExtractConstraintsFromAction ('ActionSpec _ _ constraints _) = constraints
 
 -- ============================================================================
@@ -200,11 +219,6 @@ type family LookupParamInList (paramName :: Symbol) (params :: [(Symbol, Type)])
   LookupParamInList paramName '[] =
     TypeError ('Text "Parameter " ':<>: 'ShowType paramName ':<>: 'Text " not found")
 
--- | Looks up the 'Type' of a specific parameter ('param') within a specific validator ('vName')
--- defined in the application ('app'). Used for type validation.
-type family LookupValidatorParamType (vName :: Symbol) (param :: Symbol) (app :: Type) :: Type where   
-  LookupValidatorParamType vName param app = FindParamInValidatorList vName param (Validators app)
-
 -- | Helper for 'LookupValidatorParamType': Searches the list of 'ValidatorDef's for the
 -- specified validator and parameter.
 type family FindParamInValidatorList (vName :: Symbol) (param :: Symbol) (validators :: [ValidatorDef]) :: Type where   
@@ -219,23 +233,14 @@ type family FindParamInValidatorList (vName :: Symbol) (param :: Symbol) (valida
 -- 5. VALIDATION TYPE FAMILIES
 -- ============================================================================
 
--- Note: The core validation type families (InitialStateInStates,
--- ValidateAppInstanceParameters, etc.) are declared in Foundation.Types
--- since they're used in the AppSpec superclass constraints.
-
--- | Constraint requiring that all 'StateType's in a list have 'Generic' instances
--- (needed for serialization and generic operations like field extraction).
-type family AllStateTypesGeneric (states :: [StateType]) :: Constraint where
+-- | Constraint requiring that all state types in a list have 'Generic' instances
+-- for their underlying data type.
+type family AllStateTypesGeneric (states :: [Type]) :: Constraint where
   AllStateTypesGeneric '[] = ()
-  AllStateTypesGeneric (st ': rest) = 
-    ( Generic (GetStateData st)
+  AllStateTypesGeneric (s ': rest) = 
+    ( Generic (StateDatum s)
     , AllStateTypesGeneric rest
     )
-
--- | Extracts the 'PlutusVersion' used by the application.
--- Assumes all validators in the app use the same version.
-type family ExtractPlutusVersion (app :: Type) :: PlutusVersion where
-  ExtractPlutusVersion app = ExtractPlutusVersionFromValidators (Validators app)
 
 -- | Helper for 'ExtractPlutusVersion': Extracts the 'PlutusVersion' from the first validator in the list.
 type family ExtractPlutusVersionFromValidators (validators :: [ValidatorDef]) :: PlutusVersion where
@@ -243,25 +248,8 @@ type family ExtractPlutusVersionFromValidators (validators :: [ValidatorDef]) ::
   ExtractPlutusVersionFromValidators '[] = 
     TypeError ('Text "Cannot extract Plutus version from empty validator list")
 
--- | Checks if a given 'StateType' exists within a list of 'StateType's. Returns 'Bool'.
-type family StateInStateList (st :: StateType) (states :: [StateType]) :: Bool where
-  StateInStateList st (st ': _) = 'True
-  StateInStateList st (_ ': rest) = StateInStateList st rest
-  StateInStateList _ '[] = 'False
-
--- ============================================================================
--- 6. PREDICATE TYPE FAMILIES
--- ============================================================================
-
--- | Internal helper: Attempts the first type computation; falls back to the second if the first fails.
--- Used by 'GGetFieldType' to search both sides of a product type (:*:).
-type family Try (a :: k) (b :: k) :: k where
-  Try a _ = a
-
--- | Internal helper: Extracts the type of a field ('Symbol') from a record's
--- generic representation ('Rep'). Used for predicate validation.
-type family GGetFieldType (rep :: Type -> Type) (field :: Symbol) :: Type where
-  GGetFieldType (M1 S ('MetaSel ('Just field) _ _ _) (K1 _ fieldType)) field = fieldType
-  GGetFieldType (M1 _ _ f) field = GGetFieldType f field
-  GGetFieldType (f :*: g) field =
-    Try (GGetFieldType f field) (Try (GGetFieldType g field) (TypeError ('Text "Field not found: " ':<>: 'ShowType field)))
+-- | A conditional constraint helper that applies 'StateDatumConstraints'
+-- | only if the 'Maybe Type' is a 'Just s'.
+type family MaybeStateDatumConstraints (mt :: Maybe Type) :: Constraint where
+  MaybeStateDatumConstraints 'Nothing = ()
+  MaybeStateDatumConstraints ('Just s) = StateDatumConstraints s

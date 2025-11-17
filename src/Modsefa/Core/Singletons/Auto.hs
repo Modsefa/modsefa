@@ -43,6 +43,7 @@ to work with Modsefa specifications at runtime.
 --   5. Field & Constraint Auto Generation
 --   6. State & Reference Auto Generation
 --   7. Parameter & Derivation Auto Generation
+--   8. State Property Auto Generation
 module Modsefa.Core.Singletons.Auto
   ( -- * Main Entry Point
     autoSingletonFull
@@ -61,12 +62,16 @@ module Modsefa.Core.Singletons.Auto
     -- * Parameter & Derivation Classes
   , AutoSingletonAppInstanceParams(..)
   , AutoSingletonParamDerivationList(..)
+  , AutoSingletonParamList(..)
+
+    -- * State Properties
+  , AutoSingletonStateSpec(..)
   ) where
 
 import Data.Kind (Type)
 import Data.Proxy (Proxy(Proxy))
 import Data.Typeable (Typeable)
-import GHC.Generics (Generic, Rep)
+import GHC.Generics (Rep)
 import GHC.TypeLits (KnownNat, KnownSymbol, Symbol)
 
 import GeniusYield.Types (PlutusVersion(..))
@@ -74,23 +79,25 @@ import PlutusLedgerApi.V3 (ToData)
 
 import Modsefa.Core.Foundation
   ( ActionStep(..), AppSpec(..), CollectionConstraint(..), DerivationSource(..)
-  , FieldSpec(..), GExtractField, GetStateData, InstanceType(..)
-  , ParamDerivation(..), ParamsToValue, SStateType(SStateType), StateRepresentable
-  , StateType(..), TypedActionSpec(..), TypedConstraint(..), TypedOperation(..)
-  , TypedPredicate(And, FieldEquals), TypedStateRef(..), TypedValue(..)
-  , ValidatorDef(..), ValidatorSpec(..)
+  , FieldSpec(..), GExtractField, InstanceType(..), ParamDerivation(..)
+  , ParamsToValue, RefStrategy(..), SpecPolicySource(..), SpecStateIdentifier(..)
+  , StateDatum, StateSpec(..), TypedActionSpec(..), TypedConstraint(..)
+  , TypedOperation(..), TypedPredicate(And, FieldEquals), TypedStateRef(..)
+  , TypedValue(..), ValidatorDef(..), ValidatorSpec(..)
   )
-  
+
 import Modsefa.Core.Singletons.Types
   ( FromEnumValue, GBuildDatumFromSpecs, SActionSpec(..), SActionSpecList(..)
   , SActionStep(..), SActionStepList(..), SActionTransition(..)
   , SActionTransitionList(..), SAppInstanceParamList(..), SAppSpec(..)
   , SAppStateList(..), SCollectionConstraint(..), SCollectionConstraintList(..)
-  , SConstraint(..), SConstraintList(..), SDerivationSource(..), SFieldSpec(..)
-  , SFieldSpecList(..), SInitialAppState(..), SInstanceType(..), SOperation(..)
-  , SOperationList(..), SParamDerivation(..), SParamDerivationList(..)
-  , SParamList(..), SPlutusVersion(..), SPredicate(..), SStateList(..)
-  , SStateRef(..), STypedValue(..), SValidator(..), SValidatorList(..)
+  , SConstraint(..), SConstraintList(..), SDatumField(..), SDatumFieldList(..)
+  , SDerivationSource(..), SFieldSpec(..), SFieldSpecList(..), SInitialAppState(..)
+  , SInstanceType(..), SMappability(..), SOperation(..), SOperationList(..)
+  , SParamDerivation(..), SParamDerivationList(..), SParamList(..)
+  , SPlutusVersion(..), SPolicySource(..), SPredicate(..), SRefStrategy(..)
+  , SStateIdentifier(..), SStateList(..), SStateRef(..), SStateSpec(..)
+  , STypedValue(..), SValidator(..), SValidatorList(..)
   )
 
 
@@ -188,7 +195,7 @@ instance (KnownSymbol state) => AutoSingletonInitialAppState state where
   autoSingletonInitialAppState = SInitialAppState (Proxy @state)
 
 -- | Type class for automatically deriving an 'SActionTransitionList' from the 'ActionTransitions' list.
-class AutoSingletonActionTransitionList (transitions :: [(TypedActionSpec app, Symbol, Symbol)]) where
+class AutoSingletonActionTransitionList (transitions :: [(TypedActionSpec, Symbol, Symbol)]) where
   -- | Method to produce the 'SActionTransitionList' singleton.
   autoSingletonActionTransitionList :: SActionTransitionList app transitions
 
@@ -203,7 +210,7 @@ instance ( AutoSingletonActionTransition transition -- Derive head SActionTransi
   autoSingletonActionTransitionList = SATLCons autoSingletonActionTransition autoSingletonActionTransitionList
 
 -- | Type class for automatically deriving an 'SActionTransition' singleton from a transition tuple.
-class AutoSingletonActionTransition (transition :: (TypedActionSpec app, Symbol, Symbol)) where
+class AutoSingletonActionTransition (transition :: (TypedActionSpec, Symbol, Symbol)) where
   -- | Method to produce the 'SActionTransition' singleton.
   autoSingletonActionTransition :: SActionTransition app transition
 
@@ -276,22 +283,22 @@ instance (KnownSymbol param, AutoSingletonOperation op, AutoSingletonCollectionC
   autoSingletonActionStep = SMap autoSingletonOperation (Proxy @param) autoSingletonCollectionConstraintList
 
 -- | Type class for automatically deriving an 'SActionSpec' singleton.
-class AutoSingletonActionSpec (spec :: TypedActionSpec app) where
+class AutoSingletonActionSpec (spec :: TypedActionSpec) where
   -- | Method to produce the 'SActionSpec' singleton.
-  autoSingletonActionSpec :: SActionSpec app spec
+  autoSingletonActionSpec :: SActionSpec spec
 
 instance ( KnownSymbol name
          , AutoSingletonActionStepList steps
          , AutoSingletonConstraintList constraints
          , AutoSingletonParamList params
-         ) => AutoSingletonActionSpec ('ActionSpec @app name steps constraints params) where
+         ) => AutoSingletonActionSpec ('ActionSpec name steps constraints params) where
   autoSingletonActionSpec = SActionSpec (Proxy @name) 
                                        (autoSingletonActionStepList @steps)
                                        (autoSingletonConstraintList @constraints)
                                        autoSingletonParamList
 
 -- | Type class for automatically deriving an 'SActionSpecList'.
-class AutoSingletonActionSpecs (specs :: [TypedActionSpec app]) where
+class AutoSingletonActionSpecs (specs :: [TypedActionSpec]) where
   -- | Method to produce the 'SActionSpecList' singleton.
   autoSingletonActionSpecs :: SActionSpecList specs
 
@@ -321,37 +328,36 @@ class AutoSingletonOperation (op :: TypedOperation) where
   -- | Method to produce the 'SOperation' singleton.
   autoSingletonOperation :: SOperation op
 
--- Instance for Create: Derives SStateType, SFieldSpecList, SConstraintList. Requires StateRepresentable, GBuildDatumFromSpecs.
-instance ( st ~ 'ST name record -- Ensures st matches the pattern
-         , KnownSymbol name
-         , StateRepresentable st
-         , GBuildDatumFromSpecs (Rep record)
+-- Instance for Create: Derives SStateSpec, SFieldSpecList, SConstraintList. Requires StateSpec, GBuildDatumFromSpecs.
+instance ( StateSpec s
+         , AutoSingletonStateSpec s
+         , GBuildDatumFromSpecs (Rep (StateDatum s))
          , AutoSingletonFieldSpecList fields
          , AutoSingletonConstraintList constraints
-         ) => AutoSingletonOperation ('Create @('ST name record) fields constraints) where
-  autoSingletonOperation = SCreate (SStateType @st) autoSingletonFieldSpecList autoSingletonConstraintList
+         ) => AutoSingletonOperation ('Create @s fields constraints) where
+  autoSingletonOperation = SCreate autoSingletonStateSpec autoSingletonFieldSpecList autoSingletonConstraintList
 
--- Instance for Update: Derives SStateRef, SFieldSpecList, SConstraintList. Requires StateRepresentable, GBuildDatumFromSpecs.
-instance ( StateRepresentable st
-         , GBuildDatumFromSpecs (Rep (GetStateData st))
-         , AutoSingletonStateRef st ref
+-- Instance for Update: Derives SStateRef, SFieldSpecList, SConstraintList. Requires StateSpec, GBuildDatumFromSpecs.
+instance ( StateSpec s
+         , GBuildDatumFromSpecs (Rep (StateDatum s))
+         , AutoSingletonStateRef s ref
          , AutoSingletonFieldSpecList fields
          , AutoSingletonConstraintList constraints
-         ) => AutoSingletonOperation ('Update @st ref fields constraints) where
+         ) => AutoSingletonOperation ('Update @s ref fields constraints) where
   autoSingletonOperation = SUpdate autoSingletonStateRef autoSingletonFieldSpecList autoSingletonConstraintList
 
--- Instance for Delete: Derives SStateRef, SConstraintList. Requires StateRepresentable.
-instance ( StateRepresentable st
-         , AutoSingletonStateRef st ref
+-- Instance for Delete: Derives SStateRef, SConstraintList. Requires StateSpec.
+instance ( StateSpec s
+         , AutoSingletonStateRef s ref
          , AutoSingletonConstraintList constraints
-         ) => AutoSingletonOperation ('Delete @st ref constraints) where
+         ) => AutoSingletonOperation ('Delete @s ref constraints) where
   autoSingletonOperation = SDelete autoSingletonStateRef autoSingletonConstraintList
 
--- Instance for Reference: Derives SStateRef, SConstraintList. Requires StateRepresentable.
-instance ( StateRepresentable st
-         , AutoSingletonStateRef st ref
+-- Instance for Reference: Derives SStateRef, SConstraintList. Requires StateSpec.
+instance ( StateSpec s
+         , AutoSingletonStateRef s ref
          , AutoSingletonConstraintList constraints
-         ) => AutoSingletonOperation ('Reference @st ref constraints) where
+         ) => AutoSingletonOperation ('Reference @s ref constraints) where
   autoSingletonOperation = SReference autoSingletonStateRef autoSingletonConstraintList
 
 -- ============================================================================
@@ -438,34 +444,44 @@ instance (KnownSymbol vName, KnownSymbol param) => AutoSingletonConstraint ('Mus
 instance (KnownSymbol param) => AutoSingletonConstraint ('MustSpendActionParam param) where
   autoSingletonConstraint = SMustSpendActionParam (Proxy @param)
 
-instance (st ~ 'ST name record, KnownSymbol name, StateRepresentable st) => AutoSingletonConstraint ('MustNotExist @st 'TypedTheOnlyInstance) where
-  autoSingletonConstraint = SMustNotExist (STypedTheOnlyInstance (SStateType @st))
+-- | Instance for 'MustNotExist'. Uses explicit type application @s to avoid ambiguity.
+instance (StateSpec s, AutoSingletonStateSpec s) => AutoSingletonConstraint ('MustNotExist ('TypedTheOnlyInstance @s)) where
+  autoSingletonConstraint = SMustNotExist (STypedTheOnlyInstance (autoSingletonStateSpec @s))
 
-instance forall st field.
+-- | Instance for 'MustBeSignedByState' with 'TypedTheOnlyInstance'.
+instance forall s field.
   ( KnownSymbol field
-  , StateRepresentable st
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
-  ) => AutoSingletonConstraint ('MustBeSignedByState ('TypedTheOnlyInstance @st) field) where
-  autoSingletonConstraint = SMustBeSignedByState (STypedTheOnlyInstance (SStateType @st)) (Proxy @field)
+  , StateSpec s
+  , AutoSingletonStateSpec s
+  , GExtractField (Rep (StateDatum s))
+  ) => AutoSingletonConstraint ('MustBeSignedByState ('TypedTheOnlyInstance @s) field) where
+  autoSingletonConstraint = SMustBeSignedByState (STypedTheOnlyInstance (autoSingletonStateSpec @s)) (Proxy @field)
 
-instance forall st pred field.
+-- | Instance for 'MustBeSignedByState' with 'TypedUniqueWhere'.
+instance forall s pred field.
   ( KnownSymbol field
+  , StateSpec s
+  , AutoSingletonStateSpec s
   , AutoSingletonPredicate pred
-  , StateRepresentable st
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
-  ) => AutoSingletonConstraint ('MustBeSignedByState ('TypedUniqueWhere @st pred) field) where
-  autoSingletonConstraint = SMustBeSignedByState (STypedUniqueWhere (SStateType @st) autoSingletonPredicate) (Proxy @field)
+  , GExtractField (Rep (StateDatum s))
+  ) => AutoSingletonConstraint ('MustBeSignedByState ('TypedUniqueWhere @s pred) field) where
+  autoSingletonConstraint = SMustBeSignedByState (STypedUniqueWhere (autoSingletonStateSpec @s) autoSingletonPredicate) (Proxy @field)
 
 instance (KnownSymbol param) => AutoSingletonConstraint ('MustBeSignedByParam param) where
   autoSingletonConstraint = SMustBeSignedByParam (Proxy @param)
 
-instance (StateRepresentable st, AutoSingletonTypedValue value) => AutoSingletonConstraint ('MustAddToAggregateState st value) where
-  autoSingletonConstraint = SMustAddToAggregateState (SStateType @st) autoSingletonTypedValue
+instance ( StateSpec s
+         , AutoSingletonStateSpec s
+         , AutoSingletonTypedValue value
+         ) => AutoSingletonConstraint ('MustAddToAggregateState s value) where
+  autoSingletonConstraint = SMustAddToAggregateState autoSingletonStateSpec autoSingletonTypedValue
 
-instance (StateRepresentable st, AutoSingletonTypedValue value, AutoSingletonTypedValue address) => AutoSingletonConstraint ('MustWithdrawFromAggregateState st value address) where
-  autoSingletonConstraint = SMustWithdrawFromAggregateState (SStateType @st) autoSingletonTypedValue autoSingletonTypedValue
+instance ( StateSpec s
+         , AutoSingletonStateSpec s
+         , AutoSingletonTypedValue value
+         , AutoSingletonTypedValue address
+         ) => AutoSingletonConstraint ('MustWithdrawFromAggregateState s value address) where
+  autoSingletonConstraint = SMustWithdrawFromAggregateState autoSingletonStateSpec autoSingletonTypedValue autoSingletonTypedValue
 
 -- | Type class for automatically deriving an 'SCollectionConstraintList'.
 class AutoSingletonCollectionConstraintList (constraints :: [CollectionConstraint]) where
@@ -491,38 +507,40 @@ instance (KnownSymbol field) => AutoSingletonCollectionConstraint ('MustHaveUniq
 -- 6. STATE & REFERENCE AUTO GENERATION
 -- ============================================================================
 
--- | Type class for automatically deriving an 'SStateList'.
-class AutoSingletonStateList (states :: [StateType]) where
+-- | Type class for automatically deriving an 'SStateList' from a type-level list of states.
+class AutoSingletonStateList (states :: [Type]) where
   -- | Method to produce the 'SStateList' singleton.
   autoSingletonStateList :: SStateList states
 
+-- | Base case: An empty list of states maps to 'SSNil'.
 instance AutoSingletonStateList '[] where
   autoSingletonStateList = SSNil
 
-instance ( StateRepresentable st
+-- | Recursive case: Derives 'SStateSpec' for the head and combines it with the tail.
+instance ( StateSpec s
+         , AutoSingletonStateSpec s
          , AutoSingletonStateList rest
-         ) => AutoSingletonStateList (st ': rest) where
-  autoSingletonStateList = SSCons (SStateType @st) (autoSingletonStateList @rest)
+         ) => AutoSingletonStateList (s ': rest) where
+  autoSingletonStateList = SSCons autoSingletonStateSpec autoSingletonStateList
 
 -- | Type class for automatically deriving an 'SStateRef' singleton.
-class AutoSingletonStateRef (st :: StateType) (ref :: TypedStateRef st) where
-  -- | Method to produce the 'SStateRef' singleton.
-  autoSingletonStateRef :: SStateRef st ref
+class AutoSingletonStateRef (s :: Type) (ref :: TypedStateRef s) where
+  autoSingletonStateRef :: SStateRef s ref
 
-instance (StateRepresentable st) => AutoSingletonStateRef st 'TypedTheOnlyInstance where
-  autoSingletonStateRef = STypedTheOnlyInstance (SStateType @st)
+instance (StateSpec s, AutoSingletonStateSpec s) => AutoSingletonStateRef s 'TypedTheOnlyInstance where
+  autoSingletonStateRef = STypedTheOnlyInstance autoSingletonStateSpec
 
-instance (AutoSingletonPredicate pred, StateRepresentable st) => AutoSingletonStateRef st ('TypedUniqueWhere pred) where
-  autoSingletonStateRef = STypedUniqueWhere (SStateType @st) autoSingletonPredicate
+instance (StateSpec s, AutoSingletonStateSpec s, AutoSingletonPredicate pred) => AutoSingletonStateRef s ('TypedUniqueWhere pred) where
+  autoSingletonStateRef = STypedUniqueWhere autoSingletonStateSpec autoSingletonPredicate
 
-instance (StateRepresentable st) => AutoSingletonStateRef st 'TypedAny where
-  autoSingletonStateRef = STypedAny (SStateType @st)
+instance (StateSpec s, AutoSingletonStateSpec s) => AutoSingletonStateRef s 'TypedAny where
+  autoSingletonStateRef = STypedAny autoSingletonStateSpec
 
-instance (AutoSingletonPredicate pred, StateRepresentable st) => AutoSingletonStateRef st ('TypedAnyWhere pred) where
-  autoSingletonStateRef = STypedAnyWhere (SStateType @st) autoSingletonPredicate
+instance (StateSpec s, AutoSingletonStateSpec s, AutoSingletonPredicate pred) => AutoSingletonStateRef s ('TypedAnyWhere pred) where
+  autoSingletonStateRef = STypedAnyWhere autoSingletonStateSpec autoSingletonPredicate
 
-instance (KnownSymbol label, StateRepresentable st) => AutoSingletonStateRef st ('TypedByLabel label) where
-  autoSingletonStateRef = STypedByLabel (SStateType @st) (Proxy @label)
+instance (StateSpec s, AutoSingletonStateSpec s, KnownSymbol label) => AutoSingletonStateRef s ('TypedByLabel label) where
+  autoSingletonStateRef = STypedByLabel autoSingletonStateSpec (Proxy @label)
 
 -- | Type class for automatically deriving an 'SPredicate' singleton.
 class AutoSingletonPredicate (pred :: TypedPredicate st) where
@@ -602,3 +620,106 @@ instance (KnownSymbol validator) => AutoSingletonDerivationSource ('ValidatorAdd
 
 instance (KnownSymbol validator) => AutoSingletonDerivationSource ('ValidatorHash validator) where
   autoSingletonDerivationSource = SValidatorHash (Proxy @validator)
+
+-- ============================================================================
+-- 8. STATE PROPERTY AUTO GENERATION
+-- ============================================================================
+
+-- | Automatically derives the 'SPolicySource' singleton from its type-level specification.
+class AutoSingletonPolicySource (ps :: SpecPolicySource) where
+  -- | Method to produce the 'SPolicySource' singleton.
+  autoSingletonPolicySource :: SPolicySource ps
+
+-- | Instance for 'OwnPolicySpec'.
+instance AutoSingletonPolicySource 'OwnPolicySpec where
+  autoSingletonPolicySource = SOwnPolicy
+
+-- | Instance for 'ExternalPolicySpec'.
+instance (KnownSymbol sym) => AutoSingletonPolicySource ('ExternalPolicySpec sym) where
+  autoSingletonPolicySource = SExternalPolicy (Proxy @sym)
+
+-- | Automatically derives the 'SStateIdentifier' singleton from its type-level specification.
+class AutoSingletonStateIdentifier (si :: SpecStateIdentifier) where
+  -- | Method to produce the 'SStateIdentifier' singleton.
+  autoSingletonStateIdentifier :: SStateIdentifier si
+
+-- | Instance for 'TokenIdentifiedSpec'.
+instance (AutoSingletonPolicySource p, KnownSymbol tn, KnownNat q)
+      => AutoSingletonStateIdentifier ('TokenIdentifiedSpec p tn q) where
+  autoSingletonStateIdentifier = STokenIdentified autoSingletonPolicySource (Proxy @tn) (Proxy @q)
+
+-- | Instance for 'AggregateAssetSpec'.
+instance (AutoSingletonPolicySource p, KnownSymbol tn) => AutoSingletonStateIdentifier ('AggregateAssetSpec p tn) where
+  autoSingletonStateIdentifier = SAggregateAsset autoSingletonPolicySource (Proxy @tn)
+
+-- | Automatically derives the 'SDatumField' singleton.
+class AutoSingletonDatumField (field :: (Symbol, Type)) where
+  autoSingletonDatumField :: SDatumField field
+
+-- | Instance for a standard field definition.
+instance (KnownSymbol name, Typeable t) => AutoSingletonDatumField '(name, t) where
+  autoSingletonDatumField = SDatumField (Proxy @name) (Proxy @t)
+
+-- | Automatically derives the 'SDatumFieldList' singleton.
+class AutoSingletonDatumFieldList (fields :: [(Symbol, Type)]) where
+  autoSingletonDatumFieldList :: SDatumFieldList fields
+
+-- | Base case: empty list.
+instance AutoSingletonDatumFieldList '[] where
+  autoSingletonDatumFieldList = SDFNil
+
+-- | Recursive step: head and tail.
+instance (AutoSingletonDatumField field, AutoSingletonDatumFieldList rest)
+      => AutoSingletonDatumFieldList (field ': rest) where
+  autoSingletonDatumFieldList = SDFCons autoSingletonDatumField autoSingletonDatumFieldList
+
+-- | Automatically derives the 'SRefStrategy' singleton.
+class AutoSingletonRefStrategy (rs :: RefStrategy) where
+  autoSingletonRefStrategy :: SRefStrategy rs
+
+-- | Instance for 'OnlyByProperty'.
+instance AutoSingletonRefStrategy 'OnlyByProperty where
+  autoSingletonRefStrategy = SOnlyByProperty
+
+-- | Instance for 'OnlyAsUnique'.
+instance AutoSingletonRefStrategy 'OnlyAsUnique where
+  autoSingletonRefStrategy = SOnlyAsUnique
+
+-- | Instance for 'AnyRef'.
+instance AutoSingletonRefStrategy 'AnyRef where
+  autoSingletonRefStrategy = SAnyRef
+
+-- | Instance for 'NoRef'.
+instance AutoSingletonRefStrategy 'NoRef where
+  autoSingletonRefStrategy = SNoRef
+
+-- | Type class for automatically deriving 'SMappability' singletons based on the 'Bool' index.
+class AutoSingletonMappability (m :: Bool) where
+  -- | Returns the corresponding 'SMappability' singleton.
+  autoSingletonMappability :: SMappability m
+
+-- | Instance for 'True' yielding 'SMappable'.
+instance AutoSingletonMappability 'True where
+  autoSingletonMappability = SMappable
+
+-- | Instance for 'False' yielding 'SNotMappable'.
+instance AutoSingletonMappability 'False where
+  autoSingletonMappability = SNotMappable
+
+-- | Automatically derives the full 'SStateSpec' singleton for a state 's'.
+class AutoSingletonStateSpec (s :: Type) where
+  autoSingletonStateSpec :: SStateSpec s
+
+-- | Standard instance for any type 's' with a 'StateSpec' instance.
+-- Recursively derives singletons for fields, identifier, and strategy.
+instance ( StateSpec s
+         , AutoSingletonDatumFieldList (DatumFields s)
+         , AutoSingletonStateIdentifier (Identifier s)
+         , AutoSingletonRefStrategy (Strategy s)
+         , AutoSingletonMappability (HasMappable s)
+         ) => AutoSingletonStateSpec s where
+  autoSingletonStateSpec = SStateSpec
+    autoSingletonDatumFieldList
+    autoSingletonStateIdentifier
+    autoSingletonRefStrategy
+    autoSingletonMappability

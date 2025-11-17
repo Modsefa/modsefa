@@ -46,13 +46,13 @@ import Data.Proxy (Proxy(Proxy))
 
 import PlutusLedgerApi.V1 (AssetClass)
 import PlutusLedgerApi.V3 
-  (Address, BuiltinByteString, POSIXTime, PubKeyHash, TxOutRef
+  ( Address, BuiltinByteString, POSIXTime, PubKeyHash, TxOutRef
   )
 
 import Modsefa.Core.Actions (TypedAction, mkTypedAction)
 import Modsefa.Core.Foundation
   ( ActionStep(Let, Map, Op), AppSpec(..), CollectionConstraint(MustHaveUniqueField)
-  , DerivationSource(ValidatorAddress, ValidatorHash), FieldSpec(SetTo, Preserve)
+  , DerivationSource(ValidatorAddress, ValidatorHash), FieldSpec(Preserve, SetTo)
   , ParamDerivation(DeriveParam), TypedActionSpec(ActionSpec), TypedConstraint(..)
   , TypedOperation(Create, Delete, Reference, Update)
   , TypedPredicate(And, FieldEquals)
@@ -60,13 +60,14 @@ import Modsefa.Core.Foundation
   , TypedValue(..), ValidatorDef(Validator)
   )
 
+import Modsefa.Examples.Subscription.Generated.Datums (Coupon)
 import Modsefa.Examples.Subscription.Types
-  ( Coupon(..), CouponState, CustomerSubscription(..), CustomerSubscriptionState
-  , PricingTier(..), PricingTierState, ServiceConfig(..), ServiceConfigState
+  ( CouponState, CustomerSubscriptionState, PricingTierState, ServiceConfigState
   , TreasuryAdaState
   )
 import Modsefa.Examples.Subscription.Validators
-  (CouponValidator, CustomerValidator, ServiceAndPricingValidator, TreasuryValidator
+  ( CouponValidator, CustomerValidator, ServiceAndPricingValidator
+  , TreasuryValidator
   )
 
 
@@ -123,7 +124,7 @@ instance AppSpec SubscriptionApp where
 -- Creates the 'ServiceConfigState' and a default 'PricingTierState'.
 -- Requires spending the bootstrap UTxO.
 type InitializeServiceSpec =
-  'ActionSpec @SubscriptionApp "InitializeService"
+  'ActionSpec "InitializeService"
     '[ -- List of ActionSteps:
        'Op ('Create @ServiceConfigState -- Create ServiceConfig
          '[ 'SetTo "serviceConfigName" ('ParamValue "serviceName")
@@ -154,14 +155,14 @@ type InitializeServiceSpec =
      ]
 
 -- | Validated token for 'InitializeServiceSpec'.
-initializeSubscriptionSpec :: TypedAction InitializeServiceSpec
-initializeSubscriptionSpec = mkTypedAction (Proxy @InitializeServiceSpec)
+initializeSubscriptionSpec :: TypedAction SubscriptionApp InitializeServiceSpec
+initializeSubscriptionSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @InitializeServiceSpec)
 
 
 -- | Specification for the "CreatePricingTier" action.
 -- Creates a new 'PricingTierState'. Requires signature from the service provider.
 type CreatePricingTierSpec =
-  'ActionSpec @SubscriptionApp "CreatePricingTier"
+  'ActionSpec "CreatePricingTier"
     '[ -- List of ActionSteps:
        'Op ('Create @PricingTierState -- Create a new PricingTier
          '[ 'SetTo "pricingTierName" ('ParamValue "tierName")
@@ -184,14 +185,14 @@ type CreatePricingTierSpec =
      ]
 
 -- | Validated token for 'CreatePricingTierSpec'.
-createPricingTierSpec :: TypedAction CreatePricingTierSpec
-createPricingTierSpec = mkTypedAction (Proxy @CreatePricingTierSpec)
+createPricingTierSpec :: TypedAction SubscriptionApp CreatePricingTierSpec
+createPricingTierSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @CreatePricingTierSpec)
 
 
 -- | Specification for the "UpdateServiceConfig" action.
 -- Updates the name in the 'ServiceConfigState'. Preserves the provider. Requires provider signature.
 type UpdateServiceConfigSpec =
-  'ActionSpec @SubscriptionApp "UpdateServiceConfig"
+  'ActionSpec "UpdateServiceConfig"
     '[ -- List of ActionSteps:
        'Op ('Update @ServiceConfigState 'TypedTheOnlyInstance -- Update the unique ServiceConfig
          '[ 'SetTo "serviceConfigName" ('ParamValue "newServiceName")
@@ -207,14 +208,14 @@ type UpdateServiceConfigSpec =
      ]
 
 -- | Validated token for 'UpdateServiceConfigSpec'.
-updateServiceConfigSpec :: TypedAction UpdateServiceConfigSpec
-updateServiceConfigSpec = mkTypedAction (Proxy @UpdateServiceConfigSpec)
+updateServiceConfigSpec :: TypedAction SubscriptionApp UpdateServiceConfigSpec
+updateServiceConfigSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @UpdateServiceConfigSpec)
 
 
 -- | Specification for the "UpdateServiceProvider" action.
 -- Updates the provider PKH in the 'ServiceConfigState'. Preserves the name. Requires old provider signature.
 type UpdateServiceProviderSpec =
-  'ActionSpec @SubscriptionApp "UpdateServiceProvider"
+  'ActionSpec "UpdateServiceProvider"
     '[ -- List of ActionSteps:
        'Op ('Update @ServiceConfigState 'TypedTheOnlyInstance -- Update the unique ServiceConfig
          '[ 'Preserve "serviceConfigName"
@@ -230,15 +231,15 @@ type UpdateServiceProviderSpec =
      ]
 
 -- | Validated token for 'UpdateServiceProviderSpec'.
-updateServiceProviderSpec :: TypedAction UpdateServiceProviderSpec
-updateServiceProviderSpec = mkTypedAction (Proxy @UpdateServiceProviderSpec)
+updateServiceProviderSpec :: TypedAction SubscriptionApp UpdateServiceProviderSpec
+updateServiceProviderSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @UpdateServiceProviderSpec)
 
 
 -- | Specification for the "BatchCreateCoupons" action.
 -- Uses 'Map' to create multiple 'CouponState' instances from a list parameter.
 -- Requires provider signature and spending a UTxO to act as the batch ID.
 type BatchCreateCouponsSpec =
-  'ActionSpec @SubscriptionApp "BatchCreateCoupons"
+  'ActionSpec "BatchCreateCoupons"
     '[ -- List of ActionSteps:
        'Map -- Map over the "newCoupons" parameter list
          ('Create @CouponState -- Operation to perform for each item
@@ -260,15 +261,15 @@ type BatchCreateCouponsSpec =
      ]
 
 -- | Validated token for 'BatchCreateCouponsSpec'.
-batchCreateCouponSpec :: TypedAction BatchCreateCouponsSpec
-batchCreateCouponSpec = mkTypedAction (Proxy @BatchCreateCouponsSpec)
+batchCreateCouponSpec :: TypedAction SubscriptionApp BatchCreateCouponsSpec
+batchCreateCouponSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @BatchCreateCouponsSpec)
 
 
 -- | Specification for the "BatchDeleteCoupons" action.
 -- Uses 'Map' to delete multiple 'CouponState' instances based on data from a list parameter.
 -- Requires provider signature.
 type BatchDeleteCouponsSpec =
-  'ActionSpec @SubscriptionApp "BatchDeleteCoupons"
+  'ActionSpec "BatchDeleteCoupons"
     '[ -- List of ActionSteps:
        'Map -- Map over the "couponsToDelete" parameter list
          ('Delete @CouponState -- Operation to perform for each item
@@ -290,15 +291,15 @@ type BatchDeleteCouponsSpec =
      ]
 
 -- | Validated token for 'BatchDeleteCouponsSpec'.
-batchDeleteCouponsSpec :: TypedAction BatchDeleteCouponsSpec
-batchDeleteCouponsSpec = mkTypedAction (Proxy @BatchDeleteCouponsSpec)
+batchDeleteCouponsSpec :: TypedAction SubscriptionApp BatchDeleteCouponsSpec
+batchDeleteCouponsSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @BatchDeleteCouponsSpec)
 
 
 -- | Specification for the "Subscribe" action (without coupon).
 -- References a 'PricingTierState', creates a 'CustomerSubscriptionState',
 -- calculates payment and end dates, requires customer signature, and adds payment to the treasury.
 type SubscribeSpec =
-  'ActionSpec @SubscriptionApp "Subscribe"
+  'ActionSpec "Subscribe"
     '[ -- List of ActionSteps:
        'Let "selectedTier" -- Label the referenced PricingTier for later use
          ('Reference @PricingTierState
@@ -341,15 +342,15 @@ type SubscribeSpec =
      ]
 
 -- | Validated token for 'SubscribeSpec'.
-subscribeSpec :: TypedAction SubscribeSpec
-subscribeSpec = mkTypedAction (Proxy @SubscribeSpec)
+subscribeSpec :: TypedAction SubscriptionApp SubscribeSpec
+subscribeSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @SubscribeSpec)
 
 
 -- | Specification for the "WithdrawTreasury" action.
 -- Allows the service provider to withdraw funds from the 'TreasuryAdaState'.
 -- Requires provider signature.
 type WithdrawTreasurySpec =
-  'ActionSpec @SubscriptionApp "WithdrawTreasury"
+  'ActionSpec "WithdrawTreasury"
     '[] -- No specific operational steps needed (handled by constraint)
     '[ -- Constraints:
        'MustBeSignedByState @ServiceConfigState 'TypedTheOnlyInstance "serviceConfigProvider"
@@ -363,14 +364,14 @@ type WithdrawTreasurySpec =
      ]
 
 -- | Validated token for 'WithdrawTreasurySpec'.
-withdrawTreasurySpec :: TypedAction WithdrawTreasurySpec
-withdrawTreasurySpec = mkTypedAction (Proxy @WithdrawTreasurySpec)
+withdrawTreasurySpec :: TypedAction SubscriptionApp WithdrawTreasurySpec
+withdrawTreasurySpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @WithdrawTreasurySpec)
 
 
 -- | Specification for the "SubscribeWithCoupon" action.
 -- Similar to 'SubscribeSpec' but references and consumes a 'CouponState' to calculate a discounted price.
 type SubscribeWithCouponSpec =
-  'ActionSpec @SubscriptionApp "SubscribeWithCoupon"
+  'ActionSpec "SubscribeWithCoupon"
     '[ -- List of ActionSteps:
        'Let "selectedTier" -- Reference the chosen pricing tier
          ('Reference @PricingTierState
@@ -439,5 +440,5 @@ type SubscribeWithCouponSpec =
      ]
 
 -- | Validated token for 'SubscribeWithCouponSpec'.
-subscribeWithCouponSpec :: TypedAction SubscribeWithCouponSpec
-subscribeWithCouponSpec = mkTypedAction (Proxy @SubscribeWithCouponSpec)
+subscribeWithCouponSpec :: TypedAction SubscriptionApp SubscribeWithCouponSpec
+subscribeWithCouponSpec = mkTypedAction (Proxy @SubscriptionApp) (Proxy @SubscribeWithCouponSpec)

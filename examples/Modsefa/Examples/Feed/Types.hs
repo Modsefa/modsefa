@@ -8,13 +8,11 @@ Stability   : experimental
 Portability : GHC
 
 This module defines:
-1.  The Haskell records ('FeedConfig', 'FeedData') used as datum types on-chain.
-2.  An enumeration ('FeedStatus') used within 'FeedData'.
-3.  The corresponding Modsefa 'Modsefa.Core.Foundation.Types.StateType' aliases ('FeedConfigState', 'FeedDataState').
-4.  'Modsefa.Core.Foundation.Types.StateRepresentable' instances defining how these states are identified and referenced on-chain.
+1.  An enumeration ('FeedStatus') used within 'FeedData'.
+2.  The type-level state tags ('FeedConfigState', 'FeedDataState').
+3.  'StateSpec' instances that define the on-chain properties (fields, identifier, strategy) for each state.
 -}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -22,9 +20,7 @@ This module defines:
 
 module Modsefa.Examples.Feed.Types
   ( -- * Data Types
-    FeedConfig (..)
-  , FeedData (..)
-  , FeedStatus (..)
+    FeedStatus (..)
     -- * State Type Aliases
   , FeedConfigState
   , FeedDataState
@@ -32,31 +28,21 @@ module Modsefa.Examples.Feed.Types
 
 import GHC.Generics (Generic)
 
-import PlutusLedgerApi.Common (BuiltinByteString)
-import PlutusLedgerApi.V3 (PubKeyHash)
+import PlutusLedgerApi.V3 (BuiltinByteString, PubKeyHash)
 import PlutusTx.Builtins (equalsData)
 import qualified PlutusTx
 import qualified PlutusTx.Eq
 
 import Modsefa.Core.Foundation
-  (PolicySource (OwnPolicy), RefStrategy (..), StateIdentifier (TokenIdentified)
-  , StateRepresentable (..), StateType (..)
+  ( RefStrategy(..), SpecPolicySource(OwnPolicySpec)
+  , SpecStateIdentifier(TokenIdentifiedSpec), StateSpec(..)
   )
 import Modsefa.Core.Singletons (FromEnumValue)
-import Modsefa.Core.Transaction (Mappable)
 
 
 -- ============================================================================
--- 1. Data Types (Used as On-Chain Datums)
+-- 1. Data Types
 -- ============================================================================
-
--- | Configuration data for the feed. Expected to be a singleton state.
-data FeedConfig = FeedConfig
-  { feedName :: BuiltinByteString -- ^ The display name of the feed.
-  , feedOwner :: PubKeyHash -- ^ The public key hash authorized to update the feed.
-  } deriving (Eq, Generic, Show)
-PlutusTx.makeLift ''FeedConfig
-PlutusTx.makeIsDataIndexed ''FeedConfig [('FeedConfig, 0)]
 
 -- | Status of a feed entry (active or archived).
 data FeedStatus = Archived | Active
@@ -69,39 +55,39 @@ instance FromEnumValue FeedStatus
 instance PlutusTx.Eq.Eq FeedStatus where
   (==) a b = equalsData (PlutusTx.toBuiltinData a) (PlutusTx.toBuiltinData b)
 
--- | Represents a single data entry in the feed. Multiple instances can exist (active/archived).
-data FeedData = FeedData
-  { feedData :: BuiltinByteString -- ^ The content of the feed entry.
-  , feedStatus :: FeedStatus  -- ^ The status ('Active' or 'Archived').
-  } deriving (Eq, Generic, Show)
-PlutusTx.makeLift ''FeedData
-PlutusTx.makeIsDataIndexed ''FeedData [('FeedData, 0)]
--- Provide Mappable instance if needed for batch operations (though not used in Feed spec).
-instance Mappable FeedData
-
 -- ============================================================================
--- 2. StateType Definitions (Type Aliases)
+-- 2. State Tags
 -- ============================================================================
 
--- | Modsefa 'StateType' alias connecting the name "FeedConfig" to the 'FeedConfig' data type.
-type FeedConfigState = 'ST "FeedConfig" FeedConfig
--- | Modsefa 'StateType' alias connecting the name "FeedData" to the 'FeedData' data type.
-type FeedDataState = 'ST "FeedData" FeedData
+-- | Type-level tag for the feed's singleton configuration state.
+data FeedConfigState
+-- | Type-level tag for the feed's data entries (of which there can be many).
+data FeedDataState
 
 -- ============================================================================
--- 3. StateRepresentable Instances
+-- 3. StateSpec Instances
 -- ============================================================================
 
--- | Defines how 'FeedDataState' is represented on-chain.
-instance StateRepresentable FeedDataState where
-  -- | Identified by a unique token named "FeedData" (quantity 1) minted using the validator's own script hash ('OwnPolicy').
-  stateIdentifier _ = TokenIdentified OwnPolicy "FeedData" 1
-  -- | Can only be referenced using predicates ('TypedUniqueWhere', 'TypedAnyWhere').
-  type AllowedRefStrategy FeedDataState = 'OnlyByProperty
+-- | Specification for the 'FeedConfigState'.
+instance StateSpec FeedConfigState where
+  type DatumName FeedConfigState = "FeedConfig"
+  type DatumFields FeedConfigState = 
+    '[ '("feedName", BuiltinByteString)
+     , '("feedOwner", PubKeyHash) 
+     ]
+  -- | Identified by a unique "FeedConfig" token minted by its own validator.
+  type Identifier FeedConfigState = 'TokenIdentifiedSpec 'OwnPolicySpec "FeedConfig" 1
+  -- | This is a singleton state; it can only be referenced as 'TypedTheOnlyInstance'.
+  type Strategy FeedConfigState = 'OnlyAsUnique
 
--- | Defines how 'FeedConfigState' is represented on-chain.
-instance StateRepresentable FeedConfigState where
-  -- | Identified by a unique token named "FeedConfig" (quantity 1) minted using the validator's own script hash ('OwnPolicy').
-  stateIdentifier _ = TokenIdentified OwnPolicy "FeedConfig" 1
-  -- | Can only be referenced as the single unique instance ('TypedTheOnlyInstance').
-  type AllowedRefStrategy FeedConfigState = 'OnlyAsUnique
+instance StateSpec FeedDataState where
+  type DatumName FeedDataState = "FeedData"
+  type DatumFields FeedDataState = 
+    '[ '("feedData", BuiltinByteString)
+     , '("feedStatus", FeedStatus) 
+     ]
+  -- | Identified by a unique "FeedData" token minted by its own validator.
+  type Identifier FeedDataState = 'TokenIdentifiedSpec 'OwnPolicySpec "FeedData" 1
+  -- | Multiple instances can exist; they must be referenced by their properties
+  -- | (e.g., finding the unique one where "feedStatus" is "Active").
+  type Strategy FeedDataState = 'OnlyByProperty

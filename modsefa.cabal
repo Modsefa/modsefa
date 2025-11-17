@@ -1,6 +1,6 @@
 cabal-version:      3.6
 name:               modsefa
-version:            0.1.1
+version:            0.2.0
 license:            Apache-2.0
 license-file:       LICENSE
 copyright:          (c) The Modsefa Project
@@ -60,15 +60,17 @@ library modsefa-lib
     Modsefa.CodeGen.Generation.Constraints
     Modsefa.CodeGen.Generation.InstanceChecks
     Modsefa.CodeGen.Generation.Logic
+    Modsefa.CodeGen.Generation.State
     Modsefa.CodeGen.Generation.Validators
     Modsefa.CodeGen.Generation.ValueResolution
     Modsefa.Core.Actions
-    Modsefa.Core.Validation
     Modsefa.Core.ValidatorScript
     Modsefa.Core.Foundation
+    Modsefa.Core.Foundation.App
     Modsefa.Core.Foundation.Constraints
     Modsefa.Core.Foundation.TypeFamilies
     Modsefa.Core.Foundation.Types
+    Modsefa.Core.Foundation.Validator
     Modsefa.Core.IR.Compiler
     Modsefa.Core.IR.Types
     Modsefa.Core.Singletons
@@ -128,6 +130,7 @@ library modsefa-examples
   exposed-modules:
     Modsefa.Examples.Feed.Client
     Modsefa.Examples.Feed.Generated
+    Modsefa.Examples.Feed.Generated.Datums
     Modsefa.Examples.Feed.Scripts
     Modsefa.Examples.Feed.Spec
     Modsefa.Examples.Feed.Test
@@ -135,6 +138,7 @@ library modsefa-examples
     Modsefa.Examples.Feed.Validators
     Modsefa.Examples.Subscription.Client
     Modsefa.Examples.Subscription.Generated
+    Modsefa.Examples.Subscription.Generated.Datums
     Modsefa.Examples.Subscription.Scripts
     Modsefa.Examples.Subscription.Spec
     Modsefa.Examples.Subscription.Test

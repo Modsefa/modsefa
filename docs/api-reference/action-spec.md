@@ -15,15 +15,17 @@ Action specifications define what users can do with your application. They are t
 The core type for defining actions.
 
 ```haskell
-type ActionSpec (app :: Type) (name :: Symbol) 
-                (operations :: [ActionStep])
-                (constraints :: [TypedConstraint])
-                (parameters :: [(Symbol, Type)])
+data TypedActionSpec where
+  ActionSpec
+    :: Symbol                    -- ^ The unique name identifying this action.
+    -> [ActionStep]              -- ^ A sequence of 'ActionStep's defining the action's logic.
+    -> [TypedConstraint]         -- ^ Validation constraints applied to the overall transaction for this action.
+    -> [(Symbol, Type)]          -- ^ Parameter specifications (name and type) required by this action.
+    -> TypedActionSpec
 ```
 
 **Type Parameters:**
 
-- `app`: Your application type (e.g., `FeedApp`)
 - `name`: Action name as a type-level string
 - `operations`: List of operations this action performs
 - `constraints`: List of validation constraints
@@ -33,7 +35,7 @@ type ActionSpec (app :: Type) (name :: Symbol)
 
 ```haskell
 type CreateUserSpec =
-  'ActionSpec @MyApp "CreateUser"
+  'ActionSpec "CreateUser"
     '[ 'Op ('Create @UserState
          '[ 'SetTo "userName" ('ParamValue "name")
           , 'SetTo "userEmail" ('ParamValue "email")
@@ -74,7 +76,7 @@ In this example, a `CouponState` is first referenced and given a label `"selecte
 
 ```haskell
 type SubscribeWithCouponSpec =
-  'ActionSpec @SubscriptionApp "SubscribeWithCoupon"
+  'ActionSpec "SubscribeWithCoupon"
     '[ 'Let "selectedTier" ('Reference @PricingTierState ...) 
      , 'Let "selectedCoupon" ('Reference @CouponState ...) 
      , 'Op ('Create @CustomerSubscriptionState
@@ -129,12 +131,12 @@ Perform the same operation on multiple items from a parameter.
 Create a new instance of a state type.
 
 ```haskell
-'Create @StateType (fieldSpecs :: [FieldSpec]) (constraints :: [TypedConstraint])
+'Create @s (fieldSpecs :: [FieldSpec]) (constraints :: [TypedConstraint])
 ```
 
 **Parameters:**
 
-- `@StateType`: The state type to create (e.g., `@FeedConfigState`)
+- `@s`: The state tag type to create (e.g., `@FeedConfigState`). The framework uses this tag to find the corresponding `StateSpec` instance.
 - `fieldSpecs`: How to set each field in the new state
 - `constraints`: Additional constraints for this operation
 
@@ -283,7 +285,7 @@ State references specify which state instances an operation should target.
 Reference the unique instance of a state type (only valid for states with `'OnlyAsUnique` reference strategy).
 
 ```haskell
-'TypedTheOnlyInstance @StateType
+'TypedTheOnlyInstance @s
 ```
 
 **Example:**
@@ -315,7 +317,7 @@ Reference the unique instance that matches a specific condition.
 References any single instance of the state type. The specific instance chosen might depend on the transaction building context or off-chain selection logic. Valid for states with `'AnyRef'` strategy.
 
 ```haskell
-'TypedAny @StateType
+'TypedAny @s
 ```
 
 ### `TypedAnyWhere`
@@ -421,7 +423,7 @@ Constraints define validation rules that must be satisfied for the action to suc
 Require a signature from an address stored in a state field.
 
 ```haskell
-'MustBeSignedByState @StateType (stateRef :: TypedStateRef st) (fieldName :: Symbol)
+'MustBeSignedByState @s (stateRef :: TypedStateRef st) (fieldName :: Symbol)
 ```
 
 **Example:**
@@ -541,7 +543,7 @@ These constraints handle payment and value aggregation, typically used for treas
 Requires the transaction to pay a specified value to the validator that manages an aggregate state (like a treasury).
 
 ```haskell
-'MustAddToAggregateState (stateType :: StateType) (value :: TypedValue)
+'MustAddToAggregateState (stateType :: Type) (value :: TypedValue)
 ```
 
 **Example:**
@@ -552,7 +554,7 @@ Requires the transaction to pay a specified value to the validator that manages 
 ```
 
 ```haskell
-'MustWithdrawFromAggregateState (stateType :: StateType) (value :: TypedValue) (address :: TypedValue)
+'MustWithdrawFromAggregateState (stateType :: Type) (value :: TypedValue) (address :: TypedValue)
 ```
 
 **Example:**
@@ -589,7 +591,7 @@ Requires the transaction to spend a UTxO that is provided as an action parameter
 
 ```haskell
 type CreatePostSpec =
-  'ActionSpec @BlogApp "CreatePost"
+  'ActionSpec "CreatePost"
     '[ 'Op ('Create @BlogPostState
          '[ 'SetTo "title" ('ParamValue "postTitle")
           , 'SetTo "content" ('ParamValue "postContent")
@@ -610,7 +612,7 @@ type CreatePostSpec =
 
 ```haskell
 type UpdateFeedSpec =
-  'ActionSpec @FeedApp "UpdateFeed"
+  'ActionSpec "UpdateFeed"
     '[ 'Op ('Create @FeedDataState
          '[ 'SetTo "feedData" ('ParamValue "newContent")
           , 'SetTo "feedStatus" ('EnumValue FeedStatus "Active")
@@ -633,7 +635,7 @@ type UpdateFeedSpec =
 
 ```haskell
 type BatchCreateCouponsSpec =
-  'ActionSpec @SubscriptionApp "BatchCreateCoupons"
+  'ActionSpec "BatchCreateCoupons"
     '[ 'Map
          ('Create @CouponState
             '[ 'SetTo "couponId" ('ParamValue "couponId")
@@ -652,7 +654,7 @@ type BatchCreateCouponsSpec =
 
 ```haskell
 type TransferOwnershipSpec =
-  'ActionSpec @FeedApp "TransferOwnership" 
+  'ActionSpec "TransferOwnership" 
     '[ 'Op ('Update @FeedConfigState 'TypedTheOnlyInstance
          '[ 'Preserve "feedName"
           , 'SetTo "feedOwner" ('ParamValue "newOwner")

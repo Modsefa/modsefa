@@ -43,7 +43,7 @@ The magic happens because **everything is derived from the same source of truth*
 
 ## Key Architectural Concepts: Singletons and IR
 
-Before diving into the components you'll define (`StateType`, `ValidatorSpec`, etc.), it's helpful to understand two key internal concepts Modsefa uses to bridge the gap between your type-level specification and the final generated code: **Singletons** and the **Intermediate Representation (IR)**.
+Before diving into the components you'll define (`StateSpec`, `ValidatorSpec`, etc.), it's helpful to understand two key internal concepts Modsefa uses to bridge the gap between your type-level specification and the final generated code: **Singletons** (like `SAppSpec` and `SStateSpec`) and the **Intermediate Representation (IR)**.
 
 ### Value-Level Singletons (`SAppSpec`, `SActionSpec`, etc.)
 
@@ -74,33 +74,30 @@ After the type-level specification is represented by value-level singletons, a c
 
 ## Core Building Blocks
 
-### 1. State Types: Your Application's Data
+### 1. **`StateSpec`**: Your Application's Data
 
-**State Types** are the fundamental building blocks of any Modsefa application. They represent data that lives on-chain as UTxOs with specific structure and identification rules.
-
-``` haskell
--- Define your data structures 
-data FeedConfig = FeedConfig 
-  { feedName :: BuiltinByteString
-  , feedOwner :: PubKeyHash 
-  }
-  
--- Promote them to type-level state specifications 
-type FeedConfigState = 'ST "FeedConfig" FeedConfig
-```
-
-Each state type must specify:
-1. **Data Structure**: What fields and types your state contains
-2. **On-chain Representation**: How state instances are represented as UTxOs (containing your data in a datum, locked at a validator address, and identified by specific properties like tokens)
-3. **Reference Strategy**: How instances can be found and referenced in transactions
+**`StateSpec`s** (State Specifications) are the fundamental building blocks of any Modsefa application. They are type-class instances that define the properties of on-chain data, from which Modsefa generates the actual datum types. You define a `StateSpec` by first creating an empty tag type, and then writing an instance for it:
 
 ``` haskell
-instance StateRepresentable FeedConfigState where
-  -- UTxOs identified by holding a specific token
-  stateIdentifier _ = TokenIdentified OwnPolicy "FeedConfig" 1
-  -- Only one instance allowed - reference as "the unique one"
-  type AllowedRefStrategy FeedConfigState = 'OnlyAsUnique
+-- 1. Define a data type to act as a type-level *tag*
+data FeedConfigState
+
+-- 2. Define the StateSpec instance for the tag
+instance StateSpec FeedConfigState where 
+  -- The name of the datum type to be generated (e.g., "FeedConfig") 
+  type DatumName FeedConfigState = "FeedConfig"
+  -- The fields for the generated "FeedConfig" datum 
+  type DatumFields FeedConfigState = 
+    '[ '("feedName", BuiltinByteString)
+     , '("feedOwner", PubKeyHash) 
+     ]
+  -- How UTxOs of this state are identified
+  type Identifier FeedConfigState = 'TokenIdentifiedSpec 'OwnPolicySpec "FeedConfig" 1
+  -- This state is a singleton and must only be referenced as such
+  type Strategy FeedConfigState = 'OnlyAsUnique
 ```
+
+The framework will now **generate** the `FeedConfig` data type for you based on `DatumFields` using the `$(generateStateDatum @FeedConfigState)` splice.
 
 ### 2. Validators: Managing State Lifecycle
 
@@ -130,7 +127,7 @@ instance ValidatorSpec FeedValidator where
 
 ``` haskell
 type InitializeFeedSpec = 
-  'ActionSpec @FeedApp "InitializeFeed" 
+  'ActionSpec "InitializeFeed" 
     '[ 'Op ('Create @FeedConfigState 
          '[ 'SetTo "feedName" ('ParamValue "name")
           , 'SetTo "feedOwner" ('ParamValue "owner") 
@@ -210,7 +207,7 @@ Actions can span multiple validators seamlessly. For example, an action that cre
 
 ``` haskell
 type CreateUserAccountSpec = 
-  'ActionSpec @SomeApp "CreateUserAccount" 
+  'ActionSpec "CreateUserAccount" 
     '[ 'Op ('Create @UserAccountState [...]) -- User validator 
      , 'Op ('Update @ServiceStatsState [...]) -- Service validator 
      ] 
@@ -226,29 +223,25 @@ The framework automatically:
 - Handles parameter passing and state consistency
 - Generates appropriate redeemers for each validator
 
-## Code Generation: The Magic Behind the Scenes
+## Framework Architecture: Code Generation and Runtime Libraries
 
-Modsefa uses **Template Haskell** to analyze your type-level specification and generate code at compile time:
+Modsefa uses a combination of Template Haskell (TH) for code generation and Haskell runtime libraries for tx-building and querying.
 
-### 1. Validator Logic Generation
-For each validator, the framework:
-- Analyzes all actions that affect its managed states
-- Generates branching logic for different transaction types
-- Creates validation rules based on action constraints
-- Handles proper redeemer interpretation and state transitions
+**1. Compile-Time Code Generation (Template Haskell)**
 
-### 2. Transaction Builder Generation
-For each action, the framework:
-- Determines required UTxO inputs and outputs
-- Calculates appropriate fees and collateral
-- Handles multi-validator transaction coordination
-- Generates proper redeemers and witnesses
+At compile time, Modsefa uses TH to generate boilerplate code from your specifications:
 
-### 3. Client Library Support
-The framework also generates:
-- Functions for querying and finding state instances on-chain
-- Type-safe interfaces for constructing action parameters
-- Application instance management utilities
+- **Datum Type Generation**: The `$(generateStateDatum @MyState)` splice reads your `StateSpec` instance and generates the actual Haskell `data MyState = ...` record type.
+- **Plutus Instance Generation**: The `$(generateStateInstances)` splice generates all necessary Plutus instances (`ToData`, `FromData`, `makeLift`, etc.) for your generated datum types.
+- **Validator Script Generation**: The `$(generateAppCode @MyApp)` splice analyzes all `ActionSpecs` for each validator and generates the complete, optimized Plutus Tx validator scripts.
+- **Script Dispatcher Generation**: The `$(generateAppValidatorScripts @MyApp)` splice generates the `AppValidatorScripts` instance, which is "glue" code that maps your `ValidatorSpec` types to their compiled scripts.
+
+**2. Runtime Libraries (Standard Haskell)**
+
+The framework also provides powerful runtime libraries:
+
+- **Transaction Building**: The `Modsefa.Core.Transaction` modules provide functions like `buildTransactionDirect`. This is a library that interprets your `SActionSpec` singleton at runtime to build a valid transaction skeleton.
+- **Client Library Support**: The `Modsefa.Client modules` provide functions like `queryStateInstances` and `runAction` for querying on-chain state and executing transactions from a client-side environment.
 
 ## Type Safety: Eliminating Entire Categories of Bugs
 

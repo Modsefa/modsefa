@@ -29,14 +29,13 @@ module Modsefa.CodeGen.Generation.ValueResolution
 
 import Data.Text (unpack, Text)
 import Language.Haskell.TH
-  ( Exp, Q, conE, conT, integerL, litE, mkName, stringL, varE
+  ( Exp, Q, Type, conE, conT, integerL, litE, mkName, stringL, varE
   )
-import Prelude (Bool(..), String, error, otherwise, show, ($), (++), (==))
+import Prelude (Bool(..), String, error, fail, return, show, ($), (++), (==))
 
 import PlutusLedgerApi.V3
-  ( Extended(Finite), Interval(Interval), LowerBound(LowerBound)
-  , POSIXTime, ScriptContext(..)
-  , adaSymbol, adaToken, scriptContextTxInfo, singleton
+  ( Extended(Finite), Interval(Interval), LowerBound(LowerBound), POSIXTime
+  , ScriptContext(..), adaSymbol, adaToken, scriptContextTxInfo, singleton
   , txInfoValidRange
   )
 import PlutusTx.Builtins.HasOpaque (stringToBuiltinString)
@@ -44,47 +43,31 @@ import PlutusTx.Prelude
   ( Integer, Maybe(..), appendString, divide, traceError, (+), (-), (*)
   )
 
-import Modsefa.Core.IR.Types (ActionIR(..), FieldValueIR(..), OperationIR(..))
+import Modsefa.Core.IR.Types
+    ( ActionIR(..), FieldValueIR(..), OperationIR(..), StateInfoIR(..)
+    )
 
 
--- | (Internal) Finds the 'ReferenceOpIR' corresponding to a given label ('Text')
--- within the list of operations in an 'ActionIR'. Used by 'generateValueExpression'
--- to find the state name associated with a 'FromStateField' label.
-findRefOp :: Text -> ActionIR -> Maybe OperationIR
-findRefOp label action = go (actionIROperations action)
-  where
-    go [] = Nothing
-    go (op@(ReferenceOpIR _ l) : ops)
-        | unpack l Prelude.== unpack label = Just op
-        | otherwise = go ops
-    go (_:ops) = go ops
+-- ============================================================================
+-- * Main Expression Generators
+-- ============================================================================
 
 -- | Generates a Plutus Tx expression ('Q Exp') that resolves a 'FieldValueIR'
 -- to its corresponding on-chain value at runtime. Requires the parent 'ActionIR'
 -- context to resolve 'FromStateField' references.
-generateValueExpression :: ActionIR -- ^ The parent action IR containing potential 'ReferenceOpIR's.
+generateValueExpression :: [StateInfoIR] -- ^ Mapping between state type and datum type
+                        -> ActionIR -- ^ The parent action IR containing potential 'ReferenceOpIR's.
                         -> FieldValueIR -- ^ The IR value specification to generate code for.
                         -> Q Exp -- ^ TH computation returning the Plutus Tx expression.
-generateValueExpression action (FromStateField label fieldName) =
-    let stateTypeName = case findRefOp label action of
-            Just (ReferenceOpIR sName _) -> conT (mkName (unpack sName))
-            _ -> error $ "CodeGen (generateValueExpression): Could not find 'Reference' operation with label '" Prelude.++ unpack label Prelude.++ "'"
-        fieldAccessor = varE (mkName (unpack fieldName))
-        datumVarName = mkName ("ref_" Prelude.++ unpack label)
-    in
-    [|
-        case $(varE datumVarName) :: Maybe $stateTypeName of
-            Just refDatum -> $(fieldAccessor) refDatum
-            Nothing -> traceError (stringToBuiltinString ("CodeGen: Pre-resolved reference input failed for label: " :: String)
-                                   `appendString` stringToBuiltinString ($(litE (stringL (unpack label))) :: String))
-    |]
--- Arithmetic Operations: Recursively generate expressions for operands and combine with Plutus Tx operators.
-generateValueExpression action (AddValueIR v1 v2) = [| $(generateValueExpression action v1) + $(generateValueExpression action v2) |]
-generateValueExpression action (SubtractValueIR v1 v2) = [| $(generateValueExpression action v1) - $(generateValueExpression action v2) |]
-generateValueExpression action (MultiplyValueIR v1 v2) = [| $(generateValueExpression action v1) * $(generateValueExpression action v2) |]
-generateValueExpression action (DivideValueIR v1 v2) = [| $(generateValueExpression action v1) `PlutusTx.Prelude.divide` $(generateValueExpression action v2) |]
-generateValueExpression _ CurrentTimeIR =
-    [|
+generateValueExpression _registry _action (FromActionParam paramName) =
+  [| $(varE (mkName (unpack paramName))) |]
+generateValueExpression _registry _action (FromInt n) =
+  [| $(litE (integerL n)) |]
+generateValueExpression _registry _action (FromEnum _typeName conName) =
+  -- Simplified Enum handling: assumes constructor is in scope.
+  [| $(conE (mkName (unpack conName))) |]
+generateValueExpression _registry _action CurrentTimeIR =
+  [|
         -- Helper function defined within the generated code.
         let
             getTxValidationStartTime :: ScriptContext -> POSIXTime
@@ -97,37 +80,51 @@ generateValueExpression _ CurrentTimeIR =
             -- Apply the helper to the current context 'ctx' (assumed in scope).
             getTxValidationStartTime ctx
     |]
-generateValueExpression _ (FromInt i) = litE (integerL i)
-generateValueExpression _ (FromEnum _ constructorName) = conE (mkName (unpack constructorName))
-generateValueExpression _ (FromActionParam name) =
-    error $ "generateValueExpression: Cannot resolve FromActionParam '" Prelude.++ unpack name Prelude.++ "' on-chain."
-generateValueExpression _ (FromInputField name) =
-    error $ "generateValueExpression: Cannot resolve FromInputField '" Prelude.++ unpack name Prelude.++ "' on-chain (needs input datum)."
+generateValueExpression registry action (AddValueIR v1 v2) =
+  [| $(generateValueExpression registry action v1) PlutusTx.Prelude.+ $(generateValueExpression registry action v2) |]
+generateValueExpression registry action (SubtractValueIR v1 v2) =
+  [| $(generateValueExpression registry action v1) PlutusTx.Prelude.- $(generateValueExpression registry action v2) |]
+generateValueExpression registry action (MultiplyValueIR v1 v2) =
+  [| $(generateValueExpression registry action v1) PlutusTx.Prelude.* $(generateValueExpression registry action v2) |]
+generateValueExpression registry action (DivideValueIR v1 v2) =
+  [| $(generateValueExpression registry action v1) `PlutusTx.Prelude.divide` $(generateValueExpression registry action v2) |]
+generateValueExpression registry action (FromStateField label field) = do
+    stateName <- getStateNameForLabel action label
+    let datumTypeQ = lookupDatumType registry stateName
+    let refVarName = mkName ("ref_" Prelude.++ unpack label)
+        fieldNameName = mkName (unpack field)
 
--- | Generates a Plutus Tx expression ('Q Exp') that resolves a 'FieldValueIR'
--- specifically into a Plutus 'Value' (typically for transaction outputs or comparisons).
--- Handles integer values by converting them to Lovelace 'Value'.
--- Assumes arithmetic operations on 'Value' apply primarily to the Lovelace component if mixing types.
-generatePlutusValueExpression :: ActionIR -> FieldValueIR -> Q Exp
-generatePlutusValueExpression action fv = case fv of
+    [| case $(varE refVarName) :: Maybe $datumTypeQ of
+        Just refDatum -> $(varE fieldNameName) refDatum
+        Nothing -> traceError (stringToBuiltinString ("Reference not found for field access: " :: String)
+                                   `appendString` stringToBuiltinString ($(litE (stringL (unpack label))) :: String))
+     |]
+generateValueExpression _registry _action (FromInputField fieldName) =
+   [| $(varE (mkName (unpack fieldName))) inputDatum |]
+
+-- | Generates a Plutus Tx expression that evaluates to a 'PlutusLedgerApi.V3.Value'.
+-- Handles creation of Value from asset classes and amounts, potentially derived
+-- from other fields or parameters.
+generatePlutusValueExpression :: [StateInfoIR] -> ActionIR -> FieldValueIR -> Q Exp
+generatePlutusValueExpression registry action fv = case fv of
     FromInt i ->
         [| singleton adaSymbol adaToken $(litE (integerL i)) |]
     FromStateField _ _ ->
-        [| let intVal :: Integer = $(generateValueExpression action fv)
+        [| let intVal :: Integer = $(generateValueExpression registry action fv)
            in singleton adaSymbol adaToken intVal
         |]
     AddValueIR v1 v2 ->
-        [| $(generatePlutusValueExpression action v1) + $(generatePlutusValueExpression action v2) |]
+        [| $(generatePlutusValueExpression registry action v1) + $(generatePlutusValueExpression registry action v2) |]
     SubtractValueIR v1 v2 ->
-         [| $(generatePlutusValueExpression action v1) - $(generatePlutusValueExpression action v2) |]
+         [| $(generatePlutusValueExpression registry action v1) - $(generatePlutusValueExpression registry action v2) |]
     MultiplyValueIR v1 v2 ->
-         [| let val1 :: Integer = $(generateValueExpression action v1)
-                val2 :: Integer = $(generateValueExpression action v2)
+         [| let val1 :: Integer = $(generateValueExpression registry action v1)
+                val2 :: Integer = $(generateValueExpression registry action v2)
             in singleton adaSymbol adaToken (val1 * val2)
          |]
     DivideValueIR v1 v2 ->
-         [| let val1 :: Integer = $(generateValueExpression action v1)
-                val2 :: Integer = $(generateValueExpression action v2)
+         [| let val1 :: Integer = $(generateValueExpression registry action v1)
+                val2 :: Integer = $(generateValueExpression registry action v2)
             in singleton adaSymbol adaToken (val1 `PlutusTx.Prelude.divide` val2)
          |]
     _ -> error $ "generatePlutusValueExpression: Unsupported FieldValueIR for Plutus Value: " Prelude.++ show fv
@@ -135,14 +132,41 @@ generatePlutusValueExpression action fv = case fv of
 -- | Generates a Plutus Tx expression ('Q Exp') that resolves a 'FieldValueIR'
 -- specifically into a Plutus 'Address'.
 -- Currently only supports 'FromStateField' where the field type is 'Address'.
-generateAddressExpression :: ActionIR -> FieldValueIR -> Q Exp
-generateAddressExpression action fv = case fv of
+generateAddressExpression :: [StateInfoIR] -> ActionIR -> FieldValueIR -> Q Exp
+generateAddressExpression registry action fv = case fv of
     -- Address comes from a field in a referenced state datum.
     FromStateField _ _ ->
         -- Use generateValueExpression, assuming the field's type is indeed Address.
         -- Type checking relies on the Haskell type checker where this Exp is spliced.
-        generateValueExpression action fv
+        generateValueExpression registry action fv
     -- Action parameters cannot be resolved on-chain this way.
     FromActionParam name ->
         error $ "generateAddressExpression: Cannot resolve Address FromActionParam '" Prelude.++ unpack name Prelude.++ "' on-chain."
     _ -> error $ "generateAddressExpression: Unsupported FieldValueIR for Plutus Address: " Prelude.++ show fv
+
+-- ============================================================================
+-- * Internal Helpers
+-- ============================================================================
+
+-- | (Internal) Looks up the datum type name ('Q Type') for a given state tag
+-- | from the 'StateInfoIR' registry.
+lookupDatumType :: [StateInfoIR] -> Text -> Q Type
+lookupDatumType registry stateName = do
+    let find p (x:xs) = if p x then Just x else find p xs
+        find _ [] = Nothing
+    case find (\info -> stateInfoName info == stateName) registry of
+        Just info -> conT (mkName (unpack (stateInfoDatumName info)))
+        Nothing   -> fail $ "CodeGen Error: State '" Prelude.++ unpack stateName Prelude.++ "' not found in app registry."
+
+-- | (Internal) Finds the state name ('Q Text') associated with a given
+-- | 'Let' label by searching the action's 'ReferenceOpIR' operations.
+getStateNameForLabel :: ActionIR -> Text -> Q Text
+getStateNameForLabel action label = do
+    let ops = actionIROperations action
+        find p (x:xs) = if p x then Just x else find p xs
+        find _ [] = Nothing
+        isLabel l (ReferenceOpIR _ lbl) = l == lbl
+        isLabel _ _ = False
+    case find (isLabel label) ops of
+        Just (ReferenceOpIR stateName _) -> return stateName
+        _ -> fail $ "CodeGen Error: Label '" Prelude.++ unpack label Prelude.++ "' not found in action."

@@ -21,10 +21,10 @@ module Modsefa.Core.Actions
   , mkTypedAction
   ) where
 
+import Data.Kind (Type)
 import Data.Proxy (Proxy)
 
-import Modsefa.Core.Foundation (TypedActionSpec)
-import Modsefa.Core.Validation (IsActionSpecValid)
+import Modsefa.Core.Foundation (IsActionSpecValid, TypedActionSpec)
 
 
 -- | A "proof token" GADT representing a validated action specification.
@@ -33,17 +33,18 @@ import Modsefa.Core.Validation (IsActionSpecValid)
 -- validation checks defined by the 'IsActionSpecValid' constraint.
 -- The constructor 'UnsafeMkTypedAction' is not exported, ensuring construction
 -- only happens via the 'mkTypedAction' smart constructor.
-data TypedAction (spec :: TypedActionSpec app) where
+data TypedAction (app :: Type) (spec :: TypedActionSpec) where
   -- Internal constructor, not exported.
-  UnsafeMkTypedAction :: TypedAction spec
+  UnsafeMkTypedAction :: TypedAction app spec
 
 -- | Smart constructor for 'TypedAction'.
 -- Takes a 'Proxy' for the action specification @spec@ and requires the
 -- 'IsActionSpecValid' constraint to hold for that @spec@.
 -- Attempting to call this function for an invalid specification will result
 -- in a compile-time type error, enforcing the validation rules.
-mkTypedAction :: forall spec.
-  (IsActionSpecValid spec) 
-  => Proxy spec -- ^ A proxy indicating the specific 'TypedActionSpec' to validate and represent.
-  -> TypedAction spec -- ^ The resulting proof token if validation succeeds.
-mkTypedAction _ = UnsafeMkTypedAction
+mkTypedAction :: forall app spec.
+  (IsActionSpecValid app spec) 
+  => Proxy app    -- ^ Proxy for the app to validate against
+  -> Proxy spec -- ^ A proxy indicating the specific 'TypedActionSpec' to validate and represent.
+  -> TypedAction app spec -- ^ The resulting proof token if validation succeeds.
+mkTypedAction _ _ = UnsafeMkTypedAction

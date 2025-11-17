@@ -40,13 +40,14 @@ that guides runtime behavior.
 --   04. Field & Value Singletons
 --   05. Constraint Singletons
 --   06. State & Reference Singletons
---   07. Version & Instance Singletons
---   08. Runtime Instance Types
---   09. Generic Classes
---   10. Field Extraction Utilities
---   11. Show Instances For Singleton Types
---   12. Field Resolution Functions
---   13. Generic Enum Conversion
+--   07. State Property Singletons
+--   08. Version & Instance Singletons
+--   09. Runtime Instance Types
+--   10. Generic Classes
+--   11. Field Extraction Utilities
+--   12. Show Instances For Singleton Types
+--   13. Field Resolution Functions
+--   14. Generic Enum Conversion
 module Modsefa.Core.Singletons.Types
   ( -- * Core Application Singletons
     SAppSpec(..)
@@ -90,6 +91,13 @@ module Modsefa.Core.Singletons.Types
   , SStateList(..)
   , SStateRef(..)
   , SPredicate(..)
+  , SPolicySource(..)
+  , SStateIdentifier(..)
+  , SDatumField(..)
+  , SDatumFieldList(..)
+  , SRefStrategy(..)
+  , SMappability(..)
+  , SStateSpec(..)
 
     -- * Version & Instance Singletons
   , SPlutusVersion(..)
@@ -116,31 +124,32 @@ import Data.List (elemIndex)
 import Data.Map (toList)
 import Data.Proxy (Proxy(Proxy))
 import Data.Text (Text, pack)
-import GHC.TypeLits (KnownNat, KnownSymbol, Symbol, natVal, symbolVal)
 import Data.Typeable (Typeable, cast, eqT, typeRep, type (:~:)(Refl))
 import GHC.Generics
-  ( C1, D, Generic (from, to), K1(K1), M1(..), Meta(..), Rep, S, U1(U1), (:+:) (..)
-  , (:*:) ((:*:))
+  ( C1, D, Generic(from, to), K1(K1), M1(..), Meta(..), Rep, S, U1(U1), (:+:)(..)
+  , (:*:)((:*:))
   )
+import GHC.TypeLits (KnownNat, KnownSymbol, Symbol, natVal, symbolVal)
 
 import GeniusYield.Types
-  ( GYNetworkId, GYOutDatum (..), GYProviders, GYUTxO(utxoOutDatum)
+  ( GYNetworkId, GYOutDatum(..), GYProviders, GYUTxO(utxoOutDatum)
   , PlutusVersion(..)
   )
 import PlutusLedgerApi.V3 (POSIXTime(POSIXTime), ToData(toBuiltinData))
-import PlutusTx (FromData (..))
+import PlutusTx (FromData(..))
 
 import Modsefa.Core.Foundation
-  ( ActionStep(..), AppSpec(..), CollectionConstraint(..), DerivationSource(..)
-  , FieldSpec(..), GExtractField(..), GetStateData, GetStateName, InstanceType(..)
-  , MetaSelName, ParamDerivation(..), ParamsToValue, ResolveInstanceParamList
-  , SomeFieldValue(..), SomeStatedUTxO(..), SStateType(..), StateRepresentable
-  , StateType, TypedActionSpec(..), TypedConstraint(..), TypedOperation(..)
+  ( ActionStep(..), AppSpec(..), CollectionConstraint(..), DerivationContext
+  , DerivationSource(..), FieldSpec(..), GExtractField(..), InstanceType(..)
+  , MetaSelName, ParamDerivation(..), ParamsToValue, RefStrategy(..)
+  , ResolveInstanceParamList, SomeFieldValue(..), SomeStatedUTxO(..)
+  , SpecPolicySource(..), SpecStateIdentifier(..), StateDatum, StateSpec(..)
+  , TypedActionSpec(..), TypedConstraint(..), TypedFieldPath(..), TypedOperation(..)
   , TypedPredicate(And, FieldEquals), TypedStateRef(..), TypedValue(..)
   , ValidatorDef(..), ValidatorSpec(..)
   )
 import Modsefa.Core.Transaction.Context
-  ( DerivationContext, OperationResult (ORCreate, ORReference), TxBuilder
+  ( OperationResult (ORCreate, ORReference), TxBuilder
   , TxBuilderContext (tbcCurrentTime, tbcLetResults)
   )
 
@@ -196,16 +205,16 @@ data SInitialAppState (state :: Symbol) where
   SInitialAppState :: (KnownSymbol state) => Proxy state -> SInitialAppState state
 
 -- | Singleton GADT for the list of 'ActionTransitions' in an 'AppSpec'.
-data SActionTransitionList (app :: Type) (transitions :: [(TypedActionSpec app, Symbol, Symbol)]) where
+data SActionTransitionList (app :: Type) (transitions :: [(TypedActionSpec, Symbol, Symbol)]) where
   SATLNil  :: SActionTransitionList app '[] -- ^ Represents an empty list of transitions.
   SATLCons :: SActionTransition app transition -- ^ Singleton for the head transition.
            -> SActionTransitionList app rest -- ^ Singleton for the rest of the transition list.
            -> SActionTransitionList app (transition ': rest) -- ^ Constructs the singleton list type.
 
 -- | Singleton GADT for an individual action transition tuple.
-data SActionTransition (app :: Type) (transition :: (TypedActionSpec app, Symbol, Symbol)) where
+data SActionTransition (app :: Type) (transition :: (TypedActionSpec, Symbol, Symbol)) where
   SActionTransition :: ( KnownSymbol from, KnownSymbol to) -- Ensures state names are known
-                    => SActionSpec app spec -- ^ Singleton for the 'TypedActionSpec' triggering the transition.
+                    => SActionSpec spec -- ^ Singleton for the 'TypedActionSpec' triggering the transition.
                     -> Proxy from -- ^ Proxy for the 'from' application state name.
                     -> Proxy to -- ^ Proxy for the 'to' application state name.
                     -> SActionTransition app '(spec, from, to)
@@ -284,18 +293,18 @@ data SActionStepList (steps :: [ActionStep]) where
 
 -- | Singleton GADT for a 'TypedActionSpec'. Carries singletons for the action's components.
 -- The @app@ parameter links it to the 'AppSpec'.
-data SActionSpec (app :: Type) (spec :: TypedActionSpec app) where
+data SActionSpec (spec :: TypedActionSpec) where
   SActionSpec :: ( KnownSymbol name -- Ensures action name is known
                  ) => Proxy name -- ^ Proxy for the action's name ('ActionSpecName').
                    -> SActionStepList steps -- ^ Singleton for the action's steps ('ActionSpecSteps').
                    -> SConstraintList constraints -- ^ Singleton for the action's constraints ('ActionSpecConstraints').
                    -> SParamList params -- ^ Singleton for the action's parameters ('ActionSpecParameters').
-                   -> SActionSpec app ('ActionSpec @app name steps constraints params)
+                   -> SActionSpec ('ActionSpec name steps constraints params)
 
 -- | Singleton GADT for a list of 'TypedActionSpec's.
-data SActionSpecList (actions :: [TypedActionSpec app]) where
+data SActionSpecList (actions :: [TypedActionSpec]) where
   SASNil  :: SActionSpecList '[] -- ^ Represents an empty list of action specs.
-  SASCons :: SActionSpec app spec -> SActionSpecList rest -> SActionSpecList (spec ': rest) -- ^ Constructs the singleton list type.
+  SASCons :: SActionSpec spec -> SActionSpecList rest -> SActionSpecList (spec ': rest) -- ^ Constructs the singleton list type.
 
 -- | Singleton GADT for a list of 'TypedOperation's.
 data SOperationList (ops :: [TypedOperation]) where
@@ -303,28 +312,38 @@ data SOperationList (ops :: [TypedOperation]) where
   SOLCons :: SOperation op -> SOperationList rest -> SOperationList (op ': rest) -- ^ Constructs the singleton list type.
 
 -- | Singleton GADT for an individual 'TypedOperation'.
--- Each constructor carries the necessary singletons and constraints for its corresponding operation.
+-- Each constructor carries necessary singletons and constraints for its operation.
 data SOperation (op :: TypedOperation) where
-  -- | Singleton for a 'Create' operation. Requires 'StateRepresentable' and 'GBuildDatumFromSpecs'.
-  SCreate :: (StateRepresentable st, GBuildDatumFromSpecs (Rep (GetStateData st)))
-          => SStateType st -- ^ Singleton for the 'StateType' being created.
-          -> SFieldSpecList fields -- ^ Singleton for the field assignments.
+  -- | Singleton for a 'Create' operation.
+  -- Requires 'GBuildDatumFromSpecs' on the state's datum to allow generic construction.
+  SCreate :: forall (s :: Type) (fields :: [FieldSpec]) (constraints :: [TypedConstraint]).
+             ( StateSpec s
+             , GBuildDatumFromSpecs (Rep (StateDatum s))
+             )
+          => SStateSpec s                -- ^ Singleton for the state specification being created.
+          -> SFieldSpecList fields       -- ^ Singleton for the field assignments.
           -> SConstraintList constraints -- ^ Singleton for operation-specific constraints.
-          -> SOperation ('Create fields constraints) -- Adjusted to match GADT constructor
-  -- | Singleton for an 'Update' operation. Requires 'StateRepresentable' and 'GBuildDatumFromSpecs'.
-  SUpdate :: (StateRepresentable st, GBuildDatumFromSpecs (Rep (GetStateData st)))
-          => SStateRef st ref -- ^ Singleton for the 'TypedStateRef' identifying the state to update.
-          -> SFieldSpecList fields -- ^ Singleton for the field modifications.
+          -> SOperation ('Create @s fields constraints)
+  -- | Singleton for an 'Update' operation.
+  -- Requires 'GBuildDatumFromSpecs' to allow generic updating of the datum.
+  SUpdate :: forall (s :: Type) (ref :: TypedStateRef s) (fields :: [FieldSpec]) (constraints :: [TypedConstraint]).
+             (  StateSpec s
+             , GBuildDatumFromSpecs (Rep (StateDatum s))
+             )
+          => SStateRef s ref             -- ^ Singleton for the state reference to update.
+          -> SFieldSpecList fields       -- ^ Singleton for the field modifications.
           -> SConstraintList constraints -- ^ Singleton for operation-specific constraints.
           -> SOperation ('Update ref fields constraints)
-  -- | Singleton for a 'Delete' operation. Requires 'StateRepresentable'.
-  SDelete :: StateRepresentable st
-          => SStateRef st ref -- ^ Singleton for the 'TypedStateRef' identifying the state to delete.
+  -- | Singleton for a 'Delete' operation.
+  SDelete :: forall (s :: Type) (ref :: TypedStateRef s) (constraints :: [TypedConstraint]).
+             (StateSpec s)
+          => SStateRef s ref             -- ^ Singleton for the state reference to delete.
           -> SConstraintList constraints -- ^ Singleton for operation-specific constraints.
           -> SOperation ('Delete ref constraints)
-  -- | Singleton for a 'Reference' operation. Requires 'StateRepresentable'.
-  SReference :: StateRepresentable st
-             => SStateRef st ref -- ^ Singleton for the 'TypedStateRef' identifying the state to reference.
+  -- | Singleton for a 'Reference' operation.
+  SReference :: forall (s :: Type) (ref :: TypedStateRef s) (constraints :: [TypedConstraint]).
+                (StateSpec s)
+             => SStateRef s ref             -- ^ Singleton for the state reference to read.
              -> SConstraintList constraints -- ^ Singleton for operation-specific constraints.
              -> SOperation ('Reference ref constraints)
 
@@ -374,40 +393,75 @@ data SConstraintList (constraints :: [TypedConstraint]) where
   SCLNil  :: SConstraintList '[] -- ^ Represents an empty list of constraints.
   SCLCons :: SConstraint constraint -> SConstraintList rest -> SConstraintList (constraint ': rest) -- ^ Constructs the singleton list type.
 
--- | Singleton GADT for an individual 'TypedConstraint'. Mirrors the structure of 'TypedConstraint'.
+-- | Singleton GADT for an individual 'TypedConstraint'.
+-- Mirrors the structure of 'TypedConstraint' at the value level.
 data SConstraint (constraint :: TypedConstraint) where
-  -- | Singleton for 'MustSpendValidatorParam'. Holds proxies for validator and parameter names
+  -- ** State-based constraints
+
+  -- | Singleton for 'MustBeSignedByState'.
+  -- Requires 'GExtractField' on the state's datum generic representation
+  -- to ensure the key field can be extracted on-chain.
+  SMustBeSignedByState :: forall (s :: Type) (ref :: TypedStateRef s) (field :: Symbol).
+                          (StateSpec s, KnownSymbol field, GExtractField (Rep (StateDatum s)))
+                       => SStateRef s ref -> Proxy field -> SConstraint ('MustBeSignedByState ref field)
+  -- | Singleton for 'PreserveStateField'.
+  SPreserveStateField :: (StateSpec s)
+                      => SStateRef s ref
+                      -> TypedFieldPath record field fieldType
+                      -> SConstraint ('PreserveStateField ref ('TypedFieldPath @record @field @fieldType))
+  -- | Singleton for 'RequireStateValue'.
+  SRequireStateValue :: (StateSpec s)
+                     => SStateRef s ref
+                     -> TypedFieldPath record field fieldType
+                     -> STypedValue value
+                     -> SConstraint ('RequireStateValue ref ('TypedFieldPath @record @field @fieldType) value)
+
+  -- ** Existence constraints
+
+  -- | Singleton for 'MustExist'.
+  SMustExist :: (StateSpec s) => SStateRef s ref -> SConstraint ('MustExist ref)
+  -- | Singleton for 'MustNotExist'.
+  SMustNotExist :: (StateSpec s) => SStateRef s ref -> SConstraint ('MustNotExist ref)
+
+  -- ** Counting constraints
+
+  -- | Singleton for 'ExactlyN'.
+  SExactlyN :: (StateSpec s, KnownNat n) => Proxy n -> SStateRef s ref -> SConstraint ('ExactlyN n ref)
+  -- | Singleton for 'AtLeastN'.
+  SAtLeastN :: (StateSpec s, KnownNat n) => Proxy n -> SStateRef s ref -> SConstraint ('AtLeastN n ref)
+  -- | Singleton for 'AtMostN'.
+  SAtMostN :: (StateSpec s, KnownNat n) => Proxy n -> SStateRef s ref -> SConstraint ('AtMostN n ref)
+
+  -- ** Parameter-based constraints
+
+  -- | Deprecated singleton for 'MustSpendParam'.
+  SMustSpendParam :: (KnownSymbol param) => Proxy param -> SConstraint ('MustSpendParam param)
+  -- | Singleton for 'MustBeSignedByParam'.
+  SMustBeSignedByParam :: (KnownSymbol param) => Proxy param -> SConstraint ('MustBeSignedByParam param)
+  -- | Singleton for 'MustSpendActionParam'.
+  SMustSpendActionParam :: (KnownSymbol param) => Proxy param -> SConstraint ('MustSpendActionParam param)
+  -- | Singleton for 'MustSpendValidatorParam'.
   SMustSpendValidatorParam :: (KnownSymbol vName, KnownSymbol param)
-                           => Proxy vName -> Proxy param
-                           -> SConstraint ('MustSpendValidatorParam vName param)
-  -- | Singleton for 'MustSpendActionParam'. Holds a proxy for the parameter name.
-  SMustSpendActionParam :: (KnownSymbol param)
-                        => Proxy param
-                        -> SConstraint ('MustSpendActionParam param)
-  -- | Singleton for 'MustBeSignedByState'. Holds the 'SStateRef' and field name proxy. Includes necessary constraints.
-  SMustBeSignedByState ::
-    ( StateRepresentable st
-    , Generic (GetStateData st)
-    , GExtractField (Rep (GetStateData st))
-    , KnownSymbol field
-    ) => SStateRef st ref -> Proxy field -> SConstraint ('MustBeSignedByState ref field)
-  -- | Singleton for 'MustNotExist'. Holds the 'SStateRef'.
-  SMustNotExist :: SStateRef st ref -> SConstraint ('MustNotExist ref)
-  -- | Singleton for 'MustBeSignedByParam'. Holds a proxy for the parameter name.
-  SMustBeSignedByParam :: (KnownSymbol param)
-                        => Proxy param
-                        -> SConstraint ('MustBeSignedByParam param)
-  -- | Singleton for 'MustAddToAggregateState'. Holds the 'SStateType' and 'STypedValue'.
-  SMustAddToAggregateState :: (StateRepresentable st)
-                       => SStateType st
-                       -> STypedValue value
-                       -> SConstraint ('MustAddToAggregateState st value)
-  -- | Singleton for 'MustWithdrawFromAggregateState'. Holds 'SStateType' and value/address 'STypedValue's.
-  SMustWithdrawFromAggregateState :: (StateRepresentable st)
-                                => SStateType st
-                                -> STypedValue value
-                                -> STypedValue address
-                                -> SConstraint ('MustWithdrawFromAggregateState st value address)
+                           => Proxy vName -> Proxy param -> SConstraint ('MustSpendValidatorParam vName param)
+  -- | Singleton for 'MustBeSignedByValidatorParam'.
+  SMustBeSignedByValidatorParam :: (KnownSymbol vName, KnownSymbol param)
+                                => Proxy vName -> Proxy param -> SConstraint ('MustBeSignedByValidatorParam vName param)
+
+  -- ** Aggregate State constraints
+
+  -- | Singleton for 'MustAddToAggregateState'.
+  -- Carries the 'SStateSpec' for the aggregate state to allow runtime resolution of its properties.
+  SMustAddToAggregateState :: (StateSpec s)
+                           => SStateSpec s
+                           -> STypedValue value
+                           -> SConstraint ('MustAddToAggregateState s value)
+  -- | Singleton for 'MustWithdrawFromAggregateState'.
+  -- Carries the 'SStateSpec' for the aggregate state.
+  SMustWithdrawFromAggregateState :: (StateSpec s)
+                                  => SStateSpec s
+                                  -> STypedValue value
+                                  -> STypedValue address
+                                  -> SConstraint ('MustWithdrawFromAggregateState s value address)
 
 -- | Singleton GADT for a list of 'CollectionConstraint's (used within 'SMap').
 data SCollectionConstraintList (constraints :: [CollectionConstraint]) where
@@ -423,10 +477,10 @@ data SCollectionConstraint (constraint :: CollectionConstraint) where
 -- 6. STATE & REFERENCE SINGLETONS
 -- ============================================================================
 
--- | Existential wrapper for an 'SStateType', hiding the specific state type @st@
--- but preserving the 'StateRepresentable' constraint. Useful for heterogeneous lists or maps.
+-- | Existential wrapper for 'SStateSpec', hiding the specific state type @s@
+-- but preserving the 'StateSpec' constraint.
 data SomeStateType where
-  SomeStateType :: (StateRepresentable st) => SStateType st -> SomeStateType
+  SomeStateType :: (StateSpec s) => SStateSpec s -> SomeStateType
 
 -- | Existential wrapper for an 'SValidator', hiding the specific validator type @v@
 -- but preserving 'ValidatorSpec' and 'Typeable' constraints.
@@ -437,24 +491,28 @@ data SomeValidator where
 data SomeConstraintList where
   SomeConstraintList :: SConstraintList constraints -> SomeConstraintList
 
--- | Singleton GADT for a list of 'StateType's (e.g., 'ManagedStates').
-data SStateList (states :: [StateType]) where
-  SSNil  :: SStateList '[] -- ^ Represents an empty list of states.
-  SSCons :: (StateRepresentable st) -- Ensures state is representable
-         => SStateType st -> SStateList rest -> SStateList (st ': rest) -- ^ Constructs the singleton list type.
+-- | Singleton GADT for a list of states, where each state has a 'StateSpec'.
+data SStateList (states :: [Type]) where
+  -- | Represents an empty list of states.
+  SSNil  :: SStateList '[]
+  -- | A 'StateSpec' singleton followed by the rest of the state list.
+  SSCons :: (StateSpec s)
+         => SStateSpec s      -- ^ Singleton specification for the head state.
+         -> SStateList rest   -- ^ Singleton list for the remaining states.
+         -> SStateList (s ': rest)
 
 -- | Singleton GADT for a 'TypedStateRef'. Mirrors the structure of 'TypedStateRef'.
-data SStateRef (st :: StateType) (ref :: TypedStateRef st) where
-  -- | Singleton for 'TypedTheOnlyInstance'. Holds the 'SStateType'.
-  STypedTheOnlyInstance :: SStateType st -> SStateRef st 'TypedTheOnlyInstance
-  -- | Singleton for 'TypedUniqueWhere'. Holds the 'SStateType' and 'SPredicate'.
-  STypedUniqueWhere :: SStateType st -> SPredicate pred -> SStateRef st ('TypedUniqueWhere pred)
-  -- | Singleton for 'TypedAny'. Holds the 'SStateType'.
-  STypedAny :: SStateType st -> SStateRef st 'TypedAny
-  -- | Singleton for 'TypedAnyWhere'. Holds the 'SStateType' and 'SPredicate'.
-  STypedAnyWhere :: SStateType st -> SPredicate pred -> SStateRef st ('TypedAnyWhere pred)
-  -- | Singleton for 'TypedByLabel'. Holds the 'SStateType' and label proxy.
-  STypedByLabel :: KnownSymbol label => SStateType st -> Proxy label -> SStateRef st ('TypedByLabel label)
+data SStateRef (s :: Type) (ref :: TypedStateRef st) where
+  -- | Singleton for 'TypedTheOnlyInstance'. Holds the 'SStateSpec'.
+  STypedTheOnlyInstance :: StateSpec s => SStateSpec s -> SStateRef s 'TypedTheOnlyInstance
+  -- | Singleton for 'TypedUniqueWhere'. Holds the 'SStateSpec' and 'SPredicate'.
+  STypedUniqueWhere :: StateSpec s => SStateSpec s -> SPredicate pred -> SStateRef s ('TypedUniqueWhere pred)
+  -- | Singleton for 'TypedAny'. Holds the 'SStateSpec'.
+  STypedAny :: StateSpec s => SStateSpec s -> SStateRef s 'TypedAny
+  -- | Singleton for 'TypedAnyWhere'. Holds the 'SStateSpec' and 'SPredicate'.
+  STypedAnyWhere :: StateSpec s => SStateSpec s -> SPredicate pred -> SStateRef s ('TypedAnyWhere pred)
+  -- | Singleton for 'TypedByLabel'. Holds the 'SStateSpec' and label proxy.
+  STypedByLabel :: (StateSpec s, KnownSymbol label) => SStateSpec s -> Proxy label -> SStateRef s ('TypedByLabel label)
 
 -- | Singleton GADT for a 'TypedPredicate'. Mirrors the structure of 'TypedPredicate'.
 data SPredicate (pred :: TypedPredicate st) where
@@ -464,7 +522,83 @@ data SPredicate (pred :: TypedPredicate st) where
   SAnd         :: SPredicate p1 -> SPredicate p2 -> SPredicate ('And p1 p2)
 
 -- ============================================================================
--- 7. VERSION & INSTANCE SINGLETONS
+-- 7. STATE PROPERTY SINGLETONS
+-- ============================================================================
+
+-- | Singleton GADT for 'SpecPolicySource'.
+data SPolicySource (ps :: SpecPolicySource) where
+  -- | Singleton for 'OwnPolicySpec'.
+  SOwnPolicy      :: SPolicySource 'OwnPolicySpec
+  -- | Singleton for 'ExternalPolicySpec', holding the currency symbol proxy.
+  SExternalPolicy :: (KnownSymbol sym) => Proxy sym -> SPolicySource ('ExternalPolicySpec sym)
+
+-- | Singleton GADT for 'SpecStateIdentifier'.
+data SStateIdentifier (si :: SpecStateIdentifier) where
+  -- | Singleton for 'TokenIdentifiedSpec', holding policy, token name, and quantity.
+  STokenIdentified :: (KnownSymbol tn, KnownNat q)
+                   => SPolicySource p
+                   -> Proxy tn
+                   -> Proxy q
+                   -> SStateIdentifier ('TokenIdentifiedSpec p tn q)
+  -- | Singleton for 'AggregateAssetSpec', holding the asset class symbol.
+  SAggregateAsset  :: (KnownSymbol sym)
+                   => SPolicySource p
+                   -> Proxy sym
+                   -> SStateIdentifier ('AggregateAssetSpec p sym)
+
+-- | Singleton for a single datum field definition, capturing its name and type.
+data SDatumField (field :: (Symbol, Type)) where
+  -- | Wraps proxies for the field name and type. 
+  -- Requires 'Typeable' on the field type for later reification during code generation.
+  SDatumField :: (KnownSymbol name, Typeable t)
+              => Proxy name
+              -> Proxy t
+              -> SDatumField '(name, t)
+
+-- | Singleton list of datum field definitions.
+data SDatumFieldList (fields :: [(Symbol, Type)]) where
+  -- | Empty list of fields.
+  SDFNil  :: SDatumFieldList '[]
+  -- | A field followed by the rest of the list.
+  SDFCons :: SDatumField field
+          -> SDatumFieldList rest
+          -> SDatumFieldList (field ': rest)
+
+-- | Singleton GADT for 'RefStrategy'.
+data SRefStrategy (rs :: RefStrategy) where
+  -- | Singleton for 'OnlyByProperty'.
+  SOnlyByProperty :: SRefStrategy 'OnlyByProperty
+  -- | Singleton for 'OnlyAsUnique'.
+  SOnlyAsUnique   :: SRefStrategy 'OnlyAsUnique
+  -- | Singleton for 'AnyRef'.
+  SAnyRef         :: SRefStrategy 'AnyRef
+  -- | Singleton for 'NoRef'.
+  SNoRef          :: SRefStrategy 'NoRef
+
+-- | Singleton GADT indicating mappability at the value level, indexed by a type-level 'Bool'.
+data SMappability (m :: Bool) where
+  -- | Witness that the state is mappable ('True').
+  SMappable    :: SMappability 'True
+  -- | Witness that the state is not mappable ('False').
+  SNotMappable :: SMappability 'False
+
+-- | Singleton GADT for the full 'StateSpec'.
+-- Captures all type-level configuration for a state 's' at the value level.
+data SStateSpec (s :: Type) where
+  SStateSpec :: (StateSpec s)
+             => SDatumFieldList (DatumFields s)    -- ^ Singleton for the field list.
+             -> SStateIdentifier (Identifier s)    -- ^ Singleton for the identifier strategy.
+             -> SRefStrategy (Strategy s)          -- ^ Singleton for the reference strategy.
+             -> SMappability (HasMappable s)       -- ^ Singleton for the mappable instance flag.
+             -> SStateSpec s
+
+-- | Show instance for 'SStateSpec'.
+-- Uses the captured 'StateSpec' constraint to show the datum name.
+instance Show (SStateSpec s) where
+  show (SStateSpec {}) = "SStateSpec @" ++ symbolVal (Proxy @(DatumName s))
+
+-- ============================================================================
+-- 8. VERSION & INSTANCE SINGLETONS
 -- ============================================================================
 
 -- | Singleton GADT for 'PlutusVersion'.
@@ -488,7 +622,7 @@ data SParamTuple (params :: [(Symbol, Type)]) where
              -> SParamTuple ('(name, t) ': rest) -- ^ Constructs the typed tuple.
 
 -- ============================================================================
--- 8. RUNTIME INSTANCE TYPES
+-- 9. RUNTIME INSTANCE TYPES
 -- ============================================================================
 
 -- | Holds the resolved value-level instance parameters for a specific application instance.
@@ -508,7 +642,7 @@ data SAppInstance app = SAppInstance
   }
 
 -- ============================================================================
--- 9. GENERIC CLASSES
+-- 10. GENERIC CLASSES
 -- ============================================================================
 
 -- | Generic class for building a state datum record ('rep') from a list of 'SFieldSpec's.
@@ -564,51 +698,48 @@ instance GBuildDatumFromSpecs U1 where
   gBuildDatumFromSpecs _ _ _ _ _ _ _ = return $ Right U1
 
 -- ============================================================================
--- 10. FIELD EXTRACTION UTILITIES
+-- 11. FIELD EXTRACTION UTILITIES
 -- ============================================================================
 
--- | Top-level function to extract a field's value ('SomeFieldValue') from a state datum using generics.
--- Requires 'StateRepresentable' and 'GExtractField' constraints for the state type.
-extractFieldFromDatum :: forall st.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
+-- | Top-level function to extract a field's value from a state datum using generics.
+-- Now operates on the state tag 's' and its associated 'StateDatum'.
+extractFieldFromDatum :: forall s.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GExtractField (Rep (StateDatum s))
   )
-  => Text -- ^ The name of the field to extract.
-  -> GetStateData st -- ^ The state datum value.
-  -> Maybe SomeFieldValue -- ^ 'Just' the field value wrapped in 'SomeFieldValue', or 'Nothing' if not found.
+  => Text            -- ^ The name of the field to extract.
+  -> StateDatum s    -- ^ The state datum value.
+  -> Maybe SomeFieldValue -- ^ The wrapped field value, if found.
 extractFieldFromDatum fieldName datum =
   gExtractField fieldName (from datum)
 
 -- ============================================================================
--- 11. SHOW INSTANCES FOR SINGLETON TYPES
+-- 12. SHOW INSTANCES FOR SINGLETON TYPES
 -- ============================================================================
 
--- Show instance for SomeStateType 
+-- | Show instance for 'SomeStateType'.
+-- Uses 'typeRep' to show the name of the state tag 's' (e.g., "FeedConfigState").
 instance Show SomeStateType where
-  show (SomeStateType sst) = "SomeStateType(" ++ showSStateType sst ++ ")"
-
--- Helper for showing SStateType
-showSStateType :: SStateType st -> String
-showSStateType (SStateType :: SStateType st) =
-    "SStateType @" ++ symbolVal (Proxy @(GetStateName st))
+  show (SomeStateType (_ :: SStateSpec s)) =
+    "SomeStateType @" ++ show (typeRep (Proxy @s))
 
 -- Show instance for SomeValidator (preserves GADT constraints)
 instance Show SomeValidator where
   show (SomeValidator _) = "SomeValidator(...)"
 
--- Show instance for SStateRef
-instance Show (SStateRef st ref) where
-  show (STypedTheOnlyInstance stateType) =
-    "TheOnlyInstance(" ++ show (getStateName stateType) ++ ")"
-  show (STypedUniqueWhere stateType _) =
-    "UniqueWhere(" ++ show (getStateName stateType) ++ ")"
-  show (STypedAny stateType) =
-    "Any(" ++ show (getStateName stateType) ++ ")"
-  show (STypedAnyWhere stateType _) =
-    "AnyWhere(" ++ show (getStateName stateType) ++ ")"
-  show (STypedByLabel stateType labelProxy) =
-    "ByLabel(" ++ show (getStateName stateType) ++ ", " ++ show (symbolVal labelProxy) ++ ")"
+-- | Show instance for 'SStateRef'.
+instance (Typeable s) => Show (SStateRef s ref) where
+  show (STypedTheOnlyInstance _) =
+    "TheOnlyInstance(" ++ show (typeRep (Proxy @s)) ++ ")"
+  show (STypedUniqueWhere _ _) =
+    "UniqueWhere(" ++ show (typeRep (Proxy @s)) ++ ", <predicate>)"
+  show (STypedAny _) =
+    "Any(" ++ show (typeRep (Proxy @s)) ++ ")"
+  show (STypedAnyWhere _ _) =
+    "AnyWhere(" ++ show (typeRep (Proxy @s)) ++ ", <predicate>)"
+  show (STypedByLabel _ labelProxy) =
+    "ByLabel(" ++ show (typeRep (Proxy @s)) ++ ", " ++ show (symbolVal labelProxy) ++ ")"
 
 -- Show instance for SParamDerivationList
 instance Show (SParamDerivationList derivations) where
@@ -626,12 +757,8 @@ instance Show (SDerivationSource (source :: DerivationSource t)) where
   show (SValidatorAddress p) = "SValidatorAddress(" ++ show (symbolVal p) ++ ")"
   show (SValidatorHash p)    = "SValidatorHash(" ++ show (symbolVal p) ++ ")"
 
--- | Helper to get the state name 'Text' from an 'SStateType'.
-getStateName :: forall st. SStateType st -> Text
-getStateName (SStateType :: SStateType st) = pack $ symbolVal (Proxy @(GetStateName st))
-
 -- ============================================================================
--- 12. FIELD RESOLUTION FUNCTIONS
+-- 13. FIELD RESOLUTION FUNCTIONS
 -- ============================================================================
 
 -- | (Internal) Resolves the value for a single record field based on 'SFieldSpecList'.
@@ -674,20 +801,21 @@ findFieldSpecByName name (SFSCons spec@(SPreserve fieldNameProxy) rest) =
 data SomeFieldSpec where
   SomeFieldSpec :: SFieldSpec field -> SomeFieldSpec
 
--- | (Internal) Extracts a field value of a specific type 'a' from a 'SomeStatedUTxO'.
+-- | Extracts a field value of a specific type 'a' from a 'SomeStatedUTxO'.
+-- Decodes the on-chain datum using the captured 'StateSpec' and extracts the field generically.
 extractFieldFromReferencedUTxO ::
   forall a. Typeable a =>
-  Text -> -- ^ Field name to extract.
+  Text ->           -- ^ Field name to extract.
   SomeStatedUTxO -> -- ^ The stated UTxO containing the datum.
-  Either Text a -- ^ Resulting value or error.
-extractFieldFromReferencedUTxO fieldText (SomeStatedUTxO (_ :: SStateType st) utxo) =
+  Either Text a     -- ^ Resulting value or error.
+extractFieldFromReferencedUTxO fieldText (SomeStatedUTxO (_ :: Proxy s) utxo) =
   case utxoOutDatum utxo of
     GYOutDatumInline datum ->
       let builtinData = toBuiltinData datum
-      in case fromBuiltinData builtinData :: Maybe (GetStateData st) of
+      in case fromBuiltinData builtinData :: Maybe (StateDatum s) of
         Nothing -> Left "Failed to parse datum from referenced state"
         Just stateData ->
-          case extractFieldFromDatum @st fieldText stateData of
+          case extractFieldFromDatum @s fieldText stateData of
             Nothing -> Left $ "Field '" <> fieldText <> "' not found in referenced state"
             Just (SomeFieldValue fieldValue) ->
               case cast fieldValue of
@@ -741,21 +869,10 @@ resolveFromFieldSpec (SomeFieldSpec fieldSpec) params actionParamNames derivatio
     ctx <- get
     case lookup labelText (toList $ tbcLetResults ctx) of
       Nothing -> return $ Left $ "Reference label not found in context: " <> labelText
-      -- This pattern match brings the GExtractField constraint into scope
-      Just (ORReference (SomeStatedUTxO (_stype :: SStateType st) utxo)) -> do
-        case utxoOutDatum utxo of
-          GYOutDatumInline datum ->
-            let builtinData = toBuiltinData datum
-            in case fromBuiltinData builtinData :: Maybe (GetStateData st) of
-              Nothing -> return $ Left "Failed to parse datum from referenced state"
-              Just stateData ->
-                case extractFieldFromDatum @st fieldText stateData of
-                  Nothing -> return $ Left $ "Field '" <> fieldText <> "' not found in referenced state '" <> labelText <> "'"
-                  Just (SomeFieldValue fieldValue) ->
-                    case cast fieldValue of
-                      Just (typedValue :: a) -> return $ Right typedValue
-                      Nothing -> return $ Left $ "Type mismatch for field '" <> fieldText <> "' in referenced state. Expected " <> pack (show (typeRep (Proxy @a)))
-          _ -> return $ Left "Referenced UTxO does not have an inline datum"
+      Just (ORReference statedUtxo) -> do
+         case extractFieldFromReferencedUTxO @a fieldText statedUtxo of
+           Right val -> return $ Right val
+           Left err -> return $ Left err
       Just (ORCreate _) -> return $ Left $ "Cannot reference a field from a newly created state within the same action: " <> labelText
 
   -- Handles integer literals from the spec
@@ -783,13 +900,13 @@ resolveFromFieldSpec (SomeFieldSpec fieldSpec) params actionParamNames derivatio
         let mReferencedValue = do
               opResult <- lookup labelText (toList $ tbcLetResults ctx)
               case opResult of
-                ORReference (SomeStatedUTxO (_ :: SStateType st) utxo) ->
+                ORReference (SomeStatedUTxO (_ :: Proxy s) utxo) ->
                   case utxoOutDatum utxo of
                     GYOutDatumInline datum ->
                       let builtinData = toBuiltinData datum
-                      in case fromBuiltinData builtinData :: Maybe (GetStateData st) of
+                      in case fromBuiltinData builtinData :: Maybe (StateDatum s) of
                         Nothing -> Nothing
-                        Just stateData -> extractFieldFromDatum @st fieldText stateData
+                        Just stateData -> extractFieldFromDatum @s fieldText stateData
                     _ -> Nothing -- Handle GYOutDatumNone, GYOutDatumHash if needed within lookup
                 _ -> Nothing
 
@@ -860,8 +977,8 @@ resolveFromFieldSpec (SomeFieldSpec fieldSpec) params actionParamNames derivatio
         let fieldText' = pack $ symbolVal fieldProxy'
         ctx <- get
         case lookup labelText' (toList $ tbcLetResults ctx) of
-            Just (ORReference (SomeStatedUTxO stype utxo)) ->
-                case extractFieldFromReferencedUTxO @Integer fieldText' (SomeStatedUTxO stype utxo) of
+            Just (ORReference statedUtxo) ->
+                case extractFieldFromReferencedUTxO @Integer fieldText' statedUtxo of
                     Right intValue -> return $ Right $ SomeFieldValue intValue
                     Left err -> return $ Left err
             _ -> return $ Left $ "Could not resolve StateFieldValue for arithmetic: " <> labelText' <> "." <> fieldText'
@@ -912,7 +1029,7 @@ extractParamByName targetName paramNames params = do
     extractParamAtIndex _ STupleNil = Left "Parameter index out of bounds"
 
 -- ============================================================================
--- 13. GENERIC ENUM CONVERSION
+-- 14. GENERIC ENUM CONVERSION
 -- ============================================================================
 
 -- | Generic helper class for converting a constructor name ('String') to an enum value ('rep').

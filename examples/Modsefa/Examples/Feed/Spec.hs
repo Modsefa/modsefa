@@ -30,22 +30,19 @@ module Modsefa.Examples.Feed.Spec
 
 import Data.Proxy (Proxy(Proxy))
 
-import PlutusLedgerApi.Common (BuiltinByteString)
-import PlutusLedgerApi.V3 (PubKeyHash)
+import PlutusLedgerApi.V3 (BuiltinByteString, PubKeyHash)
 
 import Modsefa.Core.Actions (TypedAction, mkTypedAction)
 import Modsefa.Core.Foundation
-  ( ActionStep(Op), AppSpec (..), FieldSpec (SetTo, Preserve)
+  ( ActionStep(Op), AppSpec(..), FieldSpec(Preserve, SetTo)
   , TypedActionSpec(ActionSpec)
   , TypedConstraint(MustBeSignedByState, MustSpendValidatorParam)
-  , TypedOperation(Create, Update), TypedPredicate (FieldEquals)
-  , TypedStateRef (TypedTheOnlyInstance, TypedUniqueWhere), TypedValue (..)
-  , ValidatorDef (Validator)
+  , TypedOperation(Create, Update), TypedPredicate(FieldEquals)
+  , TypedStateRef(TypedTheOnlyInstance, TypedUniqueWhere), TypedValue(..)
+  , ValidatorDef(Validator)
   )
 
-import Modsefa.Examples.Feed.Types 
-  ( FeedConfig(..), FeedConfigState, FeedData(..), FeedDataState, FeedStatus
-  )
+import Modsefa.Examples.Feed.Types (FeedConfigState, FeedDataState, FeedStatus)
 import Modsefa.Examples.Feed.Validators (FeedValidator)
 
 
@@ -88,7 +85,7 @@ instance AppSpec FeedApp where
 -- | Type alias for the 'TypedActionSpec' defining the "InitializeFeed" action.
 -- This action creates the initial 'FeedConfigState' and 'FeedDataState' instances.
 type InitializeFeedSpec =
-  'ActionSpec @FeedApp "InitializeFeed"
+  'ActionSpec "InitializeFeed"
     '[ -- List of ActionSteps:
        'Op ('Create @FeedConfigState -- Create the config state
          '[ 'SetTo "feedName" ('ParamValue "name") -- Set field 'feedName' from action param "name"
@@ -113,13 +110,13 @@ type InitializeFeedSpec =
 -- | A value-level "proof token" representing the validated 'InitializeFeedSpec'.
 -- 'mkTypedAction' ensures the specification is well-formed according to Modsefa's rules
 -- at compile time.
-initializeFeedSpec :: TypedAction InitializeFeedSpec
-initializeFeedSpec = mkTypedAction (Proxy @InitializeFeedSpec)
+initializeFeedSpec :: TypedAction FeedApp InitializeFeedSpec
+initializeFeedSpec = mkTypedAction (Proxy @FeedApp) (Proxy @InitializeFeedSpec)
 
 -- | Type alias for the 'TypedActionSpec' defining the "UpdateFeed" action.
 -- This action creates a new 'Active' 'FeedDataState' and archives the previous 'Active' one.
 type UpdateFeedSpec =
-  'ActionSpec @FeedApp "UpdateFeed"
+  'ActionSpec "UpdateFeed"
     '[ -- List of ActionSteps:
        'Op ('Create @FeedDataState -- Create the new active data entry
          '[ 'SetTo "feedData" ('ParamValue "newContent") -- Set content from action parameter
@@ -143,5 +140,5 @@ type UpdateFeedSpec =
      ]
 
 -- | A value-level "proof token" representing the validated 'UpdateFeedSpec'.
-updateFeedSpec :: TypedAction UpdateFeedSpec
-updateFeedSpec = mkTypedAction (Proxy @UpdateFeedSpec)
+updateFeedSpec :: TypedAction FeedApp UpdateFeedSpec
+updateFeedSpec = mkTypedAction (Proxy @FeedApp) (Proxy @UpdateFeedSpec)

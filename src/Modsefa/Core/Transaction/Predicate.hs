@@ -8,14 +8,12 @@ Stability   : experimental
 Portability : GHC
 
 This module provides the 'evaluatePredicate' function, which takes a singleton
-representation of a 'Modsefa.Core.Foundation.Types.TypedPredicate' ('SPredicate')
-and evaluates it against a concrete datum value ('GYDatum') at runtime.
+representation of a 'TypedPredicate' ('SPredicate') and evaluates it against
+a concrete datum value ('GYDatum') at runtime.
 
-This is primarily used during transaction building (specifically in
-'Modsefa.Core.Transaction.Operations.resolveStateRefSingleton') to filter UTxOs
-when resolving state references like 'Modsefa.Core.Foundation.Types.TypedUniqueWhere'
-or 'Modsefa.Core.Foundation.Types.TypedAnyWhere'. It involves resolving any
-'Modsefa.Core.Foundation.Types.TypedValue's within the predicate (potentially using
+This is primarily used during transaction building ... to filter UTxOs
+when resolving state references like 'TypedUniqueWhere' or 'TypedAnyWhere'.
+It involves resolving any 'TypedValue's within the predicate (potentially using
 action parameters) and comparing them against the corresponding fields extracted
 from the datum.
 -}
@@ -38,16 +36,15 @@ import GHC.Generics (Generic, Rep)
 import GHC.TypeLits (natVal, symbolVal)
 
 import GeniusYield.Types (GYDatum)
-import PlutusLedgerApi.V3 (toBuiltinData)
+import PlutusLedgerApi.V3 (FromData, toBuiltinData)
 import PlutusTx (fromBuiltinData)
 
 import Modsefa.Core.Foundation
-  ( GExtractField, GetStateData, SStateType, SomeFieldValue(..), StateRepresentable
-  , TypedPredicate
+  ( GExtractField, SomeFieldValue(..), StateDatum, StateSpec, TypedPredicate
   )
 import Modsefa.Core.Singletons
-  ( FromEnumValue(fromEnumValue), SParamTuple(..), SPredicate(..), STypedValue(..)
-  , extractFieldFromDatum
+  ( FromEnumValue(fromEnumValue), SParamTuple(..), SPredicate(..), SStateSpec
+  , STypedValue(..), extractFieldFromDatum
   )
 
 
@@ -59,12 +56,13 @@ import Modsefa.Core.Singletons
 -- It resolves field values from the datum and compares them against values
 -- derived from the predicate specification (which might involve action parameters).
 evaluatePredicate ::
-  forall st (pred :: TypedPredicate st) params.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
+  forall s (pred :: TypedPredicate s) params.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GExtractField (Rep (StateDatum s))
+  , FromData (StateDatum s)
   ) =>
-  SStateType st ->
+  SStateSpec s ->
   SPredicate pred ->
   SParamTuple params ->
   [Text] ->
@@ -97,14 +95,15 @@ someFieldValueEquals (SomeFieldValue v1) (SomeFieldValue v2) =
   toBuiltinData v1 == toBuiltinData v2
 
 -- | (Internal) Extracts a field's value ('SomeFieldValue') from a 'GYDatum'.
--- Parses the datum into the specified 'StateType' and uses generic field extraction.
+-- Parses the datum into the specified 'StateSpec' and uses generic field extraction.
 extractFieldValue ::
-  forall st.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GExtractField (Rep (GetStateData st))
+  forall s.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GExtractField (Rep (StateDatum s))
+  , FromData (StateDatum s)
   ) =>
-  SStateType st -> -- ^ Singleton specifying the expected 'StateType' of the datum.
+  SStateSpec s -> -- ^ Singleton specifying the expected 'StateSpec' of the datum.
   Text -> -- ^ Name of the field to extract.
   GYDatum -> -- ^ The datum value.
   Either Text SomeFieldValue -- ^ 'Right SomeFieldValue' or 'Left error'.
@@ -112,11 +111,11 @@ extractFieldValue _ fieldName datum = do
   -- Convert GYDatum to BuiltinData for parsing.
   let builtinData = toBuiltinData datum
   -- Attempt to parse BuiltinData into the Haskell record type.
-  case fromBuiltinData builtinData :: Maybe (GetStateData st) of
-    Nothing -> Left "Failed to parse datum into the specified StateType"
+  case fromBuiltinData builtinData :: Maybe (StateDatum s) of
+    Nothing -> Left "Failed to parse datum into the specified StateSpec"
     Just stateData ->
       -- If parsing succeeds, extract the field using the generic helper.
-      case extractFieldFromDatum @st fieldName stateData of
+      case extractFieldFromDatum @s fieldName stateData of
         Nothing -> Left $ "Field not found in datum: " <> fieldName
         Just value -> Right value
 

@@ -53,22 +53,22 @@ let appInstance = createAppInstance' @MyApp (param1, param2)
 Find all instances of a specific state type for an application.
 
 ```haskell
-queryStateInstances :: forall st app.
-  ( StateRepresentable st
-  , FromData (GetStateData st)
+queryStateInstances :: forall s app.
+  ( StateSpec s
+  , FromData (StateDatum s)
   , AppSpec app
   , AppValidatorScripts app
   , StateInApp st app
   )
-  => Proxy st
+  => Proxy s
   -> ClientEnv
   -> SAppInstance app
-  -> IO [StateInstance st]
+  -> IO [StateInstance s]
 ```
 
 **Parameters:**
 
-- `Proxy st`: Type proxy for the state you want to query
+- `Proxy s`: Type proxy for the state you want to query
 - `ClientEnv`: The client environment containing providers and network ID.
 - `SAppInstance app`: The specific application instance to query.
 
@@ -97,9 +97,9 @@ withClientEnv "config.json" "query-script" $ \clientEnv -> do
 Data type representing a state instance found on-chain.
 
 ```haskell
-data StateInstance (st :: StateType) = StateInstance 
+data StateInstance (s :: Type) = StateInstance 
   { siUtxoRef :: GYTxOutRef
-  , siData :: GetStateData st -- Actual parsed Haskell data
+  , siData :: StateDatum s -- Actual parsed Haskell data
   , siValue :: GYValue
   , siTimestamp :: UTCTime
   }
@@ -234,7 +234,7 @@ Your backend's first endpoint uses `buildTransactionDirect` to create the *unbal
 
 ```haskell
 -- From Modsefa.Core.Transaction.Builder
-buildTransactionDirect :: forall app (action :: TypedActionSpec app). (...)
+buildTransactionDirect :: forall app (action :: TypedActionSpec). (...)
                        => SAppInstance app
                        -> Proxy action
                        -> SParamTuple (ActionSpecParameters action)
@@ -282,7 +282,7 @@ A helper to query for a state and pretty-print the result(s).
 ```haskell
 queryAndPrintState
   :: forall app st f.
-     (Show (GetStateData st), KnownSymbol (GetStateName st))
+     (Show (StateDatum st), KnownSymbol (GetStateName st))
   => (SAppInstance app -> IO (f (StateInstance st))) -- Query function (f is Maybe or [])
   -> (f (StateInstance st) -> [StateInstance st]) -- Function to extract list
   -> SAppInstance app -- The application instance to query

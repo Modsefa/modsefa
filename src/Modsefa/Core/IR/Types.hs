@@ -26,6 +26,7 @@ foundation and singleton layers.
 module Modsefa.Core.IR.Types
   ( ActionIR(..)
   , AppIR(..)
+  , StateInfoIR(..)
   , BatchOperationIR(..)
   , CollectionConstraintIR(..)
   , ConstraintIR(..)
@@ -33,6 +34,8 @@ module Modsefa.Core.IR.Types
   , InstanceCheckIR(..)
   , OperationIR(..)
   , PubKeyHashIR(..)
+  , PolicySourceIR(..)
+  , DatumFieldIR(..)
   , ValidatorIR(..)
   ) where
 
@@ -47,6 +50,18 @@ import Modsefa.Core.Foundation.Types (SomeFieldValue)
 data AppIR = AppIR
   { appIRName      :: Text -- ^ The name of the application.
   , appIRValidators :: [ValidatorIR] -- ^ List of validators comprising the application.
+  , appIRStates     :: [StateInfoIR] -- ^ Registry of all states used in the application.
+  } deriving (Show, Eq)
+
+-- | IR representation of a state type's metadata.
+-- Maps the unique state tag to its underlying on-chain datum type.
+data StateInfoIR = StateInfoIR
+  { stateInfoName :: Text -- ^ The unique state tag name (e.g., "FeedDataState").
+  , stateInfoDatumName :: Text -- ^ The name of the on-chain datum type (e.g., "FeedData").
+  , stateInfoTokenName :: Text -- ^ The token name associated with this state's identifying asset.
+  , stateInfoPolicy :: PolicySourceIR -- ^ The policy source for this state's identifying asset.
+  , stateInfoMappable :: Bool -- ^ Indicates if the state can be used in Map operations.
+  , stateInfoFields :: [DatumFieldIR] -- ^ Fields for the datum type of the state.
   } deriving (Show, Eq)
 
 -- | IR representation of a single validator script and its associated logic.
@@ -80,18 +95,18 @@ data BatchOperationIR
 -- | IR representation of a fundamental operation on a state instance.
 data OperationIR
   = CreateOpIR -- ^ Corresponds to 'Modsefa.Core.Foundation.Create'.
-      { opIRStateName :: Text -- ^ Name of the 'Modsefa.Core.Foundation.StateType' being created.
+      { opIRStateName :: Text -- ^ Name of the state being created.
       , opIRFields    :: [(Text, FieldValueIR)] -- ^ Field assignments (field name, value source).
       }
   | UpdateOpIR -- ^ Corresponds to 'Modsefa.Core.Foundation.Update'.
-      { opIRStateName :: Text -- ^ Name of the 'Modsefa.Core.Foundation.StateType' being updated.
+      { opIRStateName :: Text -- ^ Name of the state being updated.
       , opIRFields    :: [(Text, FieldValueIR)] -- ^ Field modifications (includes 'FromInputField' for preserved fields).
       }
   | DeleteOpIR -- ^ Corresponds to 'Modsefa.Core.Foundation.Delete'.
-      { opIRStateName :: Text -- ^ Name of the 'Modsefa.Core.Foundation.StateType' being deleted.
+      { opIRStateName :: Text -- ^ Name of the state being deleted.
       }
   | ReferenceOpIR -- ^ Corresponds to 'Modsefa.Core.Foundation.Reference', typically within a 'Modsefa.Core.Foundation.Let'.
-      { opIRStateName :: Text -- ^ Name of the 'Modsefa.Core.Foundation.StateType' being referenced.
+      { opIRStateName :: Text -- ^ Name of the state being referenced.
       , opIRLabel     :: Text -- ^ The label assigned to this reference via 'Modsefa.Core.Foundation.Let'.
       }
   | BatchOpIR -- ^ Corresponds to 'Modsefa.Core.Foundation.Map'.
@@ -136,6 +151,18 @@ data PubKeyHashIR
   = FromActionParamPKH Text -- ^ PKH comes from an action parameter ('Modsefa.Core.Foundation.MustBeSignedByParam'). Text is parameter name.
   | FromStateFieldPKH Text Text -- ^ PKH comes from a field of a referenced state ('Modsefa.Core.Foundation.MustBeSignedByState'). Texts are State Name, Field Name.
   deriving (Show, Eq)
+
+-- | IR representation of the policy source for a state's identifier.
+data PolicySourceIR
+  = OwnPolicyIR -- ^ The asset is minted by the validator associated with the state the asset represents.
+  | ExternalPolicyIR Text -- ^ The asset is from an external policy, identified by its generic CurrencySymbol (hex-encoded).
+  deriving (Show, Eq)
+
+-- | Represents a single field in a state's datum.
+data DatumFieldIR = DatumFieldIR
+  { datumFieldName :: Text -- ^ The name of the field.
+  , datumFieldType :: Text -- ^ The Haskell type of the field as a string (e.g., "Integer", "Maybe PubKeyHash").
+  } deriving (Show, Eq)
 
 -- | IR representation of an instance consistency check constraint.
 -- These are generated during IR compilation to ensure references across validator boundaries are valid.

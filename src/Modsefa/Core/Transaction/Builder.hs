@@ -21,7 +21,6 @@ It orchestrates the process by:
 7. Combining all components into the final 'GeniusYield.TxBuilder.GYTxSkeleton'.
 -}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -45,8 +44,8 @@ import Control.Exception (SomeException, try)
 import Control.Monad.State (evalStateT, liftIO)
 import Data.Map (empty, fromList)
 import Data.Proxy (Proxy(Proxy))
-import Data.Typeable (Typeable)
 import Data.Text (Text, pack)
+import Data.Typeable (Typeable)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import GeniusYield.TxBuilder
@@ -63,9 +62,10 @@ import PlutusLedgerApi.V3 (TxId(getTxId), TxOutRef(txOutRefId, txOutRefIdx))
 import Modsefa.Core.Foundation
   ( ActionSpecName, ActionSpecParameters, ActionSpecSteps, AllStateTypesGeneric
   , AppSpec(AppInstanceParameters, ParameterDerivations, Validators)
-  , ExtractConstraintsFromAction, ExtractOpsFromAction, ExtractOpsFromActionSteps
-  , ExtractPlutusVersion, ExtractPlutusVersionFromValidators, ExtractStateTypes
-  , ParamsToValue, ResolveInstanceParamList, SomeFieldValue, TypedActionSpec
+  , DerivationContext, ExtractConstraintsFromAction, ExtractOpsFromAction
+  , ExtractOpsFromActionSteps, ExtractPlutusVersion
+  , ExtractPlutusVersionFromValidators, ExtractStateTypes, ParamsToValue
+  , ResolveInstanceParamList, SomeFieldValue, TypedActionSpec
   )
 import Modsefa.Core.Singletons
   ( AutoSingletonActionSpec(..), AutoSingletonParamDerivationList(..)
@@ -80,10 +80,10 @@ import Modsefa.Core.ValidatorScript (AppValidatorScripts)
 
 import Modsefa.Core.Transaction.Analysis (determineRedeemerPolicy)
 import Modsefa.Core.Transaction.Constraints 
-  (ActionConstraintsValid, processConstraintsDirectly
+  ( ActionConstraintsValid, processConstraintsDirectly
   )
 import Modsefa.Core.Transaction.Context
-  ( DerivationContext, TxBuilder(runTxBuilder), TxBuilderContext(..)
+  ( TxBuilder(runTxBuilder), TxBuilderContext(..)
   )
 import Modsefa.Core.Transaction.Operations (ProcessActionSteps, processActionSteps)
 import Modsefa.Core.Transaction.Types (RedeemerPolicy)
@@ -104,7 +104,7 @@ import Modsefa.Core.Transaction.Utils
 -- context are well-defined and possess the necessary capabilities (e.g., 'AppValidatorScripts',
 -- 'ProcessActionSteps', 'ActionConstraintsValid', singleton auto-derivation).
 buildTransactionDirect ::
-  forall app (action :: TypedActionSpec app).
+  forall app (action :: TypedActionSpec).
   ( AutoSingletonActionSpec action
   , KnownSymbol (ActionSpecName action)
   , AllStateTypesGeneric (ExtractStateTypes (ExtractOpsFromAction action))
@@ -137,7 +137,7 @@ buildTransactionDirect appInstance@(SAppInstance appSpec' _) _actionProxy params
         Left (e :: SomeException) -> return $ Left (pack $ "Failed to query on-chain time info: " ++ show e)
         Right (currentSlot, nowPlutus) -> do
           -- Automatically derive the action spec singleton.
-          let actionSpec = autoSingletonActionSpec :: SActionSpec app action
+          let actionSpec = autoSingletonActionSpec :: SActionSpec action
           -- Determine the redeemer strategy (e.g., use action name).
           let redeemerPolicy = determineRedeemerPolicy appSpec' actionSpec
           -- Initialize the transaction building context.
@@ -217,15 +217,16 @@ resolveAllDerivations appInstance@(SAppInstance _appSpec _) networkId providers 
 -- | (Internal) Orchestrates the main steps of building a transaction skeleton for a specific action.
 -- Called by 'buildTransactionDirect'.
 processActionSpec ::
-  forall app (action :: TypedActionSpec app) pv.
+  forall app (action :: TypedActionSpec) pv.
   ( AllStateTypesGeneric (ExtractStateTypes (ExtractOpsFromAction action))
   , AppValidatorScripts app
   , SingPlutusVersionI pv
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
   , ProcessActionSteps app action (ActionSpecSteps action) (ActionSpecParameters action) pv
+  , ActionConstraintsValid (ExtractConstraintsFromAction action)
   ) =>
   SAppSpec app -> -- ^ Application spec singleton.
-  SActionSpec app action -> -- ^ Action spec singleton.
+  SActionSpec action -> -- ^ Action spec singleton.
   SParamTuple (ActionSpecParameters action) -> -- ^ Action parameters.
   SInstanceParams app -> -- ^ Instance parameters.
   RedeemerPolicy -> -- ^ Redeemer policy for this action.

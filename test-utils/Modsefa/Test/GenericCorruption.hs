@@ -41,8 +41,12 @@ import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import PlutusLedgerApi.V3 (Data, FromData, ToData, fromData)
 
-import Modsefa.Core.Foundation (GetStateData, MetaSelName, StateRepresentable)
+import Modsefa.Core.Foundation (MetaSelName, StateDatum, StateSpec)
 
+
+-- ============================================================================
+-- * Generic Corruption Type Class
+-- ============================================================================
 
 -- | Generic type class defining the corruption logic based on the 'Rep'resentation of a type.
 -- Instances traverse the generic structure ('M1' for metadata, ':*:' for products)
@@ -119,21 +123,23 @@ instance {-# OVERLAPPING #-} forall i sel a.
 instance GCorruptField U1 where
   gCorruptField _ _ U1 = Right U1
 
--- | Top-level function to corrupt a field within a state datum record.
--- Takes the original state datum, the target field name, and the corrupting Plutus 'Data'.
--- Converts the datum to its generic representation, calls 'gCorruptField', and converts back.
--- Requires 'StateRepresentable' for the state type 'st', 'Generic' for its data type,
--- and 'GCorruptField' capability for the generic representation.
+-- ============================================================================
+-- * Public API
+-- ============================================================================
+
+-- | Generic helper to corrupt a specific field within a state datum.
+-- Uses 'Generic' to traverse the datum structure and apply a corruption function
+-- to the field matching the given name.
 corruptFieldGenerically ::
-  forall st.
-  ( StateRepresentable st
-  , Generic (GetStateData st)
-  , GCorruptField (Rep (GetStateData st))
+  forall s.
+  ( StateSpec s
+  , Generic (StateDatum s)
+  , GCorruptField (Rep (StateDatum s))
   ) =>
-  GetStateData st -> -- ^ The original state datum value (e.g., a 'ServiceConfig').
+  StateDatum s -> -- ^ The original state datum value (e.g., a 'ServiceConfig').
   String -> -- ^ The name of the field to corrupt (must match the record field name exactly).
   Data -> -- ^ The Plutus 'Data' to use as the corrupting value.
-  Either Text (GetStateData st) -- ^ 'Right' the modified state datum, or 'Left' error message.
+  Either Text (StateDatum s) -- ^ 'Right' the modified state datum, or 'Left' error message.
 corruptFieldGenerically originalState fieldName corruptionValue = do
   -- Convert the original datum to its generic representation.
   let genericRep = from originalState

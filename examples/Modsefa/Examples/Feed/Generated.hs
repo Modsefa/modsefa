@@ -11,14 +11,18 @@ This module contains Haskell code generated automatically using Template Haskell
 splices provided by the Modsefa code generation system ('Modsefa.CodeGen.Generation').
 It includes:
 
-1.  The TH splice `$(generateAllValidatorsForApp @FeedApp)` which generates the
-    parameterized validator logic function (e.g., `mkParameterizedFeedValidator`) and
-    its Plutus Tx wrapper (e.g., `mkWrappedParameterizedFeedValidator`) based on the
-    'Modsefa.Examples.Feed.Spec.FeedApp' specification.
-2.  Functions (e.g., 'feedValidatorCompiledCode') that provide the 'PlutusTx.CompiledCode'
-    for the validator, applying necessary parameters using 'PlutusTx.liftCode' and
-    'PlutusTx.unsafeApplyCode'. These are typically used by the 'Modsefa.Examples.Feed.Scripts'
-    module to implement the 'Modsefa.Core.ValidatorScript.AppValidatorScripts' instance.
+This module contains Haskell code generated automatically using Template Haskell (TH)
+splices provided by the Modsefa code generation system ('Modsefa.CodeGen.Generation').
+
+It includes a single TH splice, `$(generateAppCode @FeedApp)`, which is responsible
+for generating all of the following based on the 'FeedApp' specification:
+
+1.  Parameterized validator logic functions (e.g., `mkParameterizedFeedValidator`).
+2.  Plutus Tx wrapper functions (e.g., `mkWrappedParameterizedFeedValidator`).
+3.  Compiled code functions (e.g., 'feedValidatorCompiledCode') that provide the
+    'PlutusTx.CompiledCode' for the validator. These are used by the
+    'Modsefa.Examples.Feed.Scripts' module to implement the
+    'Modsefa.Core.ValidatorScript.AppValidatorScripts' instance.
 -}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -30,36 +34,17 @@ module Modsefa.Examples.Feed.Generated
     feedValidatorCompiledCode
   ) where
 
-import PlutusCore.Version (plcVersion110)
-import PlutusLedgerApi.V3 (BuiltinData, ToData(toBuiltinData), TxOutRef)
-import PlutusTx (CompiledCode, compile, liftCode, unsafeApplyCode)
-import PlutusTx.Prelude (BuiltinUnit)
+import PlutusLedgerApi.V3 (TxOutRef)
 
-import Modsefa.CodeGen.Generation (generateAllValidatorsForApp)
+import Modsefa.CodeGen.Generation (generateAppCode)
 
+import Modsefa.Examples.Feed.Generated.Datums (FeedConfig(..), FeedData(..))
 import Modsefa.Examples.Feed.Spec (FeedApp)
-import Modsefa.Examples.Feed.Types (FeedConfig(..), FeedData(..), FeedStatus(..))
+import Modsefa.Examples.Feed.Types (FeedStatus(..))
 
 
 -- ============================================================================
--- Generate Validator
+-- Generate Validator and Compiled Code Functions
 -- ============================================================================
 
--- | This Template Haskell splice invokes the Modsefa code generator.
--- It generates the following functions based on the 'FeedApp' specification:
---   - `mkParameterizedFeedValidator :: TxOutRef -> ScriptContext -> Bool` (The core logic)
---   - `mkWrappedParameterizedFeedValidator :: BuiltinData -> BuiltinData -> BuiltinUnit` (The Plutus Tx wrapper)
-$(generateAllValidatorsForApp @FeedApp)
-
--- ============================================================================
--- Compiled Code Functions
--- ============================================================================
-
--- | Provides the compiled Plutus Tx code for the 'FeedValidator'.
--- It takes the validator's runtime parameter ('TxOutRef' for the bootstrap UTxO),
--- lifts it to Plutus 'BuiltinData', applies it to the compiled wrapper function,
--- and returns the resulting 'CompiledCode' ready to be used for script creation.
-feedValidatorCompiledCode :: TxOutRef -> CompiledCode (BuiltinData -> BuiltinUnit)
-feedValidatorCompiledCode ref =
-  $$(compile [|| mkWrappedParameterizedFeedValidator ||])
-    `unsafeApplyCode` liftCode plcVersion110 (toBuiltinData ref)
+$(generateAppCode @FeedApp)

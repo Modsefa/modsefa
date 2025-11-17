@@ -54,12 +54,11 @@ import Data.Kind (Constraint)
 import Data.Proxy (Proxy(Proxy))
 import Data.Text (Text, pack)
 import Data.Typeable (Typeable, cast)
-import GHC.Generics (Generic, Rep)
-import GHC.TypeLits (Symbol, symbolVal)
+import GHC.TypeLits (symbolVal)
 
 import GeniusYield.TxBuilder
-  ( GYTxQueryMonad(utxosAtAddress), GYTxSkeleton(..), mustBeSignedBy
-  , mustHaveOutput, mustHaveRefInput, runGYTxQueryMonadIO, mustHaveInput
+  ( GYTxQueryMonad(utxosAtAddress), GYTxSkeleton(..), mustBeSignedBy, mustHaveInput
+  , mustHaveOutput, mustHaveRefInput, runGYTxQueryMonadIO
   )
 import GeniusYield.Types
   ( GYBuildPlutusScript(GYBuildPlutusScriptInlined), GYNetworkId, GYOutDatum(..)
@@ -75,15 +74,14 @@ import PlutusLedgerApi.V3 (BuiltinData(BuiltinData), PubKeyHash, toData)
 import PlutusTx (fromBuiltinData, toBuiltinData)
 
 import Modsefa.Core.Foundation
-  (  AppSpec(AppInstanceParameters, Validators), GExtractField, GetStateData
-  , ParamsToValue, ResolveInstanceParamList, SomeFieldValue(SomeFieldValue)
-  , StateRepresentable, StateType, TypedConstraint(MustBeSignedByState)
-  , TypedStateRef
+  ( AppSpec(AppInstanceParameters, Validators), ExtractStateFromConstraint
+  , MaybeStateDatumConstraints, ParamsToValue, ResolveInstanceParamList
+  , SomeFieldValue(SomeFieldValue), StateDatum, TypedConstraint
   )
 import Modsefa.Core.Singletons
-  (  SAppInstance(..), SAppSpec, SConstraint(..), SConstraintList(..)
+  ( SAppInstance(..), SAppSpec, SConstraint(..), SConstraintList(..)
   , SInstanceParams, SOperation(SUpdate), SOperationList(..), SParamTuple(STupleNil)
-  , SStateRef, SValidator, SomeConstraintList(..), SomeStateType(SomeStateType)
+  , SStateRef, SValidator, SomeStateType(SomeStateType)
   , SomeValidator(SomeValidator), extractFieldFromDatum
   , extractParamByNameDirectWithProxy, extractStateFromRef
   , findValidatorManagingState, getStateName, getValidatorNameFromSingleton
@@ -115,6 +113,7 @@ processConstraintsDirectly ::
   ( Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
   , AppValidatorScripts app
   , AppSpec app
+  , ActionConstraintsValid constraints
   , SingPlutusVersionI pv
   ) =>
   SConstraintList constraints -> -- ^ Singleton list of constraints for the action.
@@ -135,23 +134,20 @@ processConstraintsDirectly constraints operations appSpec' params paramNames ins
   case paymentSkeletonResult of
     Left err -> return $ Left err
     Right paymentSkeleton -> do
-      -- 2. Filter out constraints made redundant by the action's operations.
-      case filterRedundantConstraints constraints operations of
-        SomeConstraintList filteredConstraints -> do
-          -- 3. Process remaining constraints to identify required reference inputs.
-          refInputsResult <- processConstraintListForRefs filteredConstraints appInstance params paramNames networkId providers
-          case refInputsResult of
+      -- 3. Process remaining constraints to identify required reference inputs.
+      refInputsResult <- processConstraintListForRefs constraints operations appInstance params paramNames networkId providers
+      case refInputsResult of
+        Left err -> return $ Left err
+        Right refInputs -> do
+          -- 4. Process constraints to identify required signers.
+          signersResult <- extractRequiredSigners constraints appInstance params paramNames networkId providers
+          case signersResult of
             Left err -> return $ Left err
-            Right refInputs -> do
-              -- 4. Process constraints to identify required signers.
-              signersResult <- extractRequiredSigners constraints appInstance params paramNames networkId providers
-              case signersResult of
-                Left err -> return $ Left err
-                Right requiredSigners -> do
-                  -- 5. Add reference inputs and signers to the skeleton.
-                  let skeletonWithRefs = addReferenceInputsToSkeleton refInputs paymentSkeleton
-                  let finalSkeleton = addRequiredSignersToSkeleton requiredSigners skeletonWithRefs
-                  return $ Right finalSkeleton
+            Right requiredSigners -> do
+              -- 5. Add reference inputs and signers to the skeleton.
+              let skeletonWithRefs = addReferenceInputsToSkeleton refInputs paymentSkeleton
+              let finalSkeleton = addRequiredSignersToSkeleton requiredSigners skeletonWithRefs
+              return $ Right finalSkeleton
 
 -- ============================================================================
 -- 2. REFERENCE INPUT PROCESSING
@@ -159,30 +155,38 @@ processConstraintsDirectly constraints operations appSpec' params paramNames ins
 
 -- | (Internal) Recursively processes an 'SConstraintList' to collect all required reference inputs ('GYTxOutRef').
 processConstraintListForRefs ::
-  forall constraints app params pv.
+  forall constraints app operations params pv.
   ( AppValidatorScripts app
   , AppSpec app
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
+  , ActionConstraintsValid constraints
   , SingPlutusVersionI pv
   ) =>
   SConstraintList constraints ->
+  SOperationList operations ->
   SAppInstance app ->
   SParamTuple params ->
   [Text] ->
   GYNetworkId ->
   GYProviders ->
   TxBuilder pv (Either Text [GYTxOutRef]) -- ^ List of required reference input UTxO Refs or error.
-processConstraintListForRefs SCLNil _ _ _ _ _ = return $ Right [] -- Base case
-processConstraintListForRefs (SCLCons constraint rest) appInstance params paramNames networkId providers = do
-  -- Process head constraint
-  thisResult <- processSingleConstraintForRefs constraint appInstance params paramNames networkId providers
-  -- Process tail constraints
-  restResult <- processConstraintListForRefs rest appInstance params paramNames networkId providers
-  -- Combine results or propagate error
-  case (thisResult, restResult) of
-    (Right refs1, Right refs2) -> return $ Right (refs1 ++ refs2)
-    (Left err, _) -> return $ Left err
-    (_, Left err) -> return $ Left err
+processConstraintListForRefs SCLNil _ _ _ _ _ _ = return $ Right [] -- Base case
+processConstraintListForRefs (SCLCons constraint rest) operations appInstance params paramNames networkId providers = do
+  -- Check if the constraint is redundant (this is the filtering logic)
+  if isConstraintRedundantForOperations constraint operations
+    -- If redundant, skip it and process the rest
+    then processConstraintListForRefs rest operations appInstance params paramNames networkId providers
+    -- If not redundant, process it as normal
+    else do
+      -- Process head constraint
+      thisResult <- processSingleConstraintForRefs constraint appInstance params paramNames networkId providers
+      -- Process tail constraints (pass 'operations' along)
+      restResult <- processConstraintListForRefs rest operations appInstance params paramNames networkId providers
+      -- Combine results or propagate error
+      case (thisResult, restResult) of
+        (Right refs1, Right refs2) -> return $ Right (refs1 ++ refs2)
+        (Left err, _) -> return $ Left err
+        (_, Left err) -> return $ Left err
 
 -- | (Internal) Processes a single 'SConstraint' to determine if it requires a reference input.
 processSingleConstraintForRefs ::
@@ -190,6 +194,7 @@ processSingleConstraintForRefs ::
   ( AppValidatorScripts app
   , AppSpec app
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
+  , MaybeStateDatumConstraints (ExtractStateFromConstraint constraint)
   , SingPlutusVersionI pv
   ) =>
   SConstraint constraint ->
@@ -201,9 +206,9 @@ processSingleConstraintForRefs ::
   TxBuilder pv (Either Text [GYTxOutRef]) -- ^ List containing the required ref input (if any), or error.
 processSingleConstraintForRefs constraint appInstance params paramNames networkId providers = case constraint of
   -- MustBeSignedByState requires the state UTxO as a reference input to read the PKH field.
-  SMustBeSignedByState stateRef _fieldProxy -> do
+  SMustBeSignedByState (stateRef :: SStateRef s ref) _fieldProxy -> do
     -- Resolve the state reference to the actual UTxO Ref.
-    result <- resolveStateRefSingleton appInstance stateRef params paramNames networkId providers
+    result <- resolveStateRefSingleton @s appInstance stateRef params paramNames networkId providers
     case result of
       Left err -> return $ Left err
       Right (utxoRef', _utxo) -> return $ Right [utxoRef']
@@ -213,12 +218,13 @@ processSingleConstraintForRefs constraint appInstance params paramNames networkI
 -- 3. SIGNER EXTRACTION
 -- ============================================================================
 
--- | Recursively processes an 'SConstraintList' to collect all required signer public key hashes ('GYPubKeyHash').
+-- | (Internal) Recursively processes an 'SConstraintList' to collect all required signer public key hashes ('GYPubKeyHash').
 extractRequiredSigners ::
   forall constraints app params pv.
   ( AppValidatorScripts app
   , AppSpec app
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
+  , ActionConstraintsValid constraints
   , SingPlutusVersionI pv
   ) =>
   SConstraintList constraints ->
@@ -246,6 +252,7 @@ extractSignerFromConstraint ::
   ( AppValidatorScripts app
   , AppSpec app
   , Typeable (ParamsToValue (ResolveInstanceParamList (AppInstanceParameters app) (Validators app)))
+  , MaybeStateDatumConstraints (ExtractStateFromConstraint constraint)
   , SingPlutusVersionI pv
   ) =>
   SConstraint constraint ->
@@ -257,9 +264,9 @@ extractSignerFromConstraint ::
   TxBuilder pv (Either Text [GYPubKeyHash]) -- ^ List containing the signer PKH (if required), or error.
 extractSignerFromConstraint constraint appInstance params paramNames networkId providers = case constraint of
   -- MustBeSignedByState: Resolve the state, extract the PKH field, convert to GYPubKeyHash.
-  SMustBeSignedByState (stateRef :: SStateRef st ref) (fieldProxy :: Proxy field) -> do
+  SMustBeSignedByState (stateRef :: SStateRef s ref) (fieldProxy :: Proxy field) -> do
     -- Resolve the state reference to find the UTxO containing the PKH.
-    result <- resolveStateRefSingleton appInstance stateRef params paramNames networkId providers
+    result <- resolveStateRefSingleton @s appInstance stateRef params paramNames networkId providers
     case result of
       Left err -> return $ Left err
       Right (_utxoRef, utxo) -> do
@@ -269,10 +276,10 @@ extractSignerFromConstraint constraint appInstance params paramNames networkId p
           GYOutDatumInline gyDatum -> do
             let builtinData = toBuiltinData gyDatum
             -- Ensure type application matches the state reference's type 'st'.
-            case fromBuiltinData builtinData :: Maybe (GetStateData st) of
-              Just (stateData :: GetStateData st) -> do
+            case fromBuiltinData builtinData :: Maybe (StateDatum s) of
+              Just (stateData :: StateDatum s) -> do
                 -- Extract the specific field value.
-                case extractFieldFromDatum @st fieldName stateData of
+                case extractFieldFromDatum @s fieldName stateData of
                   Just (SomeFieldValue fieldValue) -> do
                     -- Cast the field value to Plutus PubKeyHash.
                     case cast fieldValue of
@@ -423,10 +430,6 @@ processSingleConstraintForOutput constraint appInstance params paramNames redeem
                                   _ -> return $ Left "Plutus version mismatch between transaction and validator script for withdrawal!"
   _ -> return $ Right skeleton
 
--- | (Internal) Helper to check if value v1 is greater than or equal to v2.
-valueGreaterOrEqual :: GYValue -> GYValue -> Bool
-valueGreaterOrEqual v1 v2 = valueToPlutus v1 `geq` valueToPlutus v2
-
 -- | (Internal) Recursively processes an 'SConstraintList' by calling 'processSingleConstraintForOutput'.
 processConstraintListForOutputs ::
   forall constraints app params pv.
@@ -458,20 +461,6 @@ processConstraintListForOutputs (SCLCons constraint rest) appInstance params par
 -- 5. CONSTRAINT FILTERING
 -- ============================================================================
 
--- | Filters an 'SConstraintList', removing constraints deemed redundant based on the operations ('SOperationList') in the same action.
--- Wraps the result in 'SomeConstraintList'.
-filterRedundantConstraints ::
-  SConstraintList constraints ->
-  SOperationList operations ->
-  SomeConstraintList -- ^ Existential wrapper containing the filtered list.
-filterRedundantConstraints SCLNil _ = SomeConstraintList SCLNil -- Base case
-filterRedundantConstraints (SCLCons constraint rest) operations =
-  -- If the current constraint is redundant given the operations...
-  if isConstraintRedundantForOperations constraint operations
-    then filterRedundantConstraints rest operations
-    else case filterRedundantConstraints rest operations of
-      SomeConstraintList filteredRest -> SomeConstraintList (SCLCons constraint filteredRest)
-
 -- | (Internal) Checks if a single 'SConstraint' is made redundant by *any* operation in the 'SOperationList'.
 isConstraintRedundantForOperations :: SConstraint constraint -> SOperationList operations -> Bool
 isConstraintRedundantForOperations _constraint SOLNil = False -- Base case: No operations, cannot be redundant.
@@ -493,12 +482,10 @@ isConstraintRedundantForOperation constraint operation = case (constraint, opera
   _ -> False
   where
     -- Helper to check if two SStateRefs likely refer to the same state instance
-    -- based on their structure and name. This might need refinement for complex cases.
+    -- based on their structure and name.
     sameStateRef :: SStateRef st1 ref1 -> SStateRef st2 ref2 -> Bool
     sameStateRef ref1 ref2 =
-      -- A simple check based on the extracted state name. Assumes names uniquely identify states within this context.
       extractStateFromRef ref1 == extractStateFromRef ref2
-      -- TODO: This comparison might need to be more sophisticated depending on predicate equality etc.
 
 -- ============================================================================
 -- 6. TYPE FAMILIES & VALIDATION
@@ -514,29 +501,19 @@ type family ActionConstraintsValid (constraints :: [TypedConstraint]) :: Constra
     )
 
 -- | Constraint: Ensures a single 'TypedConstraint' has the necessary type class instances
--- required for its processing (e.g., 'Generic', 'GExtractField' for 'MustBeSignedByState').
+-- (via 'StateDatumConstraints') required for its processing, if it references a state.
 type family ConstraintHasRequiredInstances (constraint :: TypedConstraint) :: Constraint where
-  -- MustBeSignedByState requires the referenced state to have field extraction capabilities.
-  ConstraintHasRequiredInstances ('MustBeSignedByState ref field) =
-    StateHasExtractableField (ExtractStateFromRef ref) field
-  ConstraintHasRequiredInstances _ = ()  -- Other constraints don't need special instances
-
--- | Constraint: Ensures a 'StateType' @st@ has 'Generic' and 'GExtractField' instances,
--- necessary for extracting the value of 'field'.
-type family StateHasExtractableField (st :: StateType) (field :: Symbol) :: Constraint where
-  StateHasExtractableField st field = 
-    ( StateRepresentable st
-    , Generic (GetStateData st)
-    , GExtractField (Rep (GetStateData st))
-    )
-
--- | Helper Type Family: Extracts the 'StateType' from a 'TypedStateRef'. (Duplicate from Validation.hs, maybe move to Foundation?)
-type family ExtractStateFromRef (ref :: TypedStateRef st) :: StateType where
-  ExtractStateFromRef (ref :: TypedStateRef st) = st
+  -- This now correctly uses our new machinery.
+  ConstraintHasRequiredInstances constraint =
+    MaybeStateDatumConstraints (ExtractStateFromConstraint constraint)
 
 -- ============================================================================
 -- 7. UTILITY FUNCTIONS
 -- ============================================================================
+
+-- | (Internal) Helper to check if value v1 is greater than or equal to v2.
+valueGreaterOrEqual :: GYValue -> GYValue -> Bool
+valueGreaterOrEqual v1 v2 = valueToPlutus v1 `geq` valueToPlutus v2
 
 -- | Adds a list of required reference inputs ('GYTxOutRef') to a transaction skeleton.
 addReferenceInputsToSkeleton :: [GYTxOutRef] -> GYTxSkeleton pv -> GYTxSkeleton pv

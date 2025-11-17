@@ -27,7 +27,7 @@ import GHC.TypeLits (symbolVal)
 
 import PlutusLedgerApi.V3 (toBuiltin)
 
-import Modsefa.Core.Singletons (SAppSpec, SActionSpec(..))
+import Modsefa.Core.Singletons (SActionSpec(..), SAppSpec)
 
 import Modsefa.Core.Transaction.Types (RedeemerPolicy(..))
 
@@ -39,7 +39,7 @@ import Modsefa.Core.Transaction.Types (RedeemerPolicy(..))
 -- always returns a 'UseNamedRedeemer' policy, using the action's name (extracted from
 -- the 'SActionSpec' and converted to 'BuiltinByteString') as the redeemer value.
 determineRedeemerPolicy :: SAppSpec app -- ^ The application specification singleton (currently unused, but kept for potential future context).
-                        -> SActionSpec app action -- ^ The singleton representing the action specification.
+                        -> SActionSpec action -- ^ The singleton representing the action specification.
                         -> RedeemerPolicy -- ^ The resulting redeemer policy.
 determineRedeemerPolicy _appSpec' (SActionSpec nameProxy _steps _constraints _) =
   let

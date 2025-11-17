@@ -214,8 +214,8 @@ package cardano-crypto-praos
 source-repository-package
   type: git
   location: https://github.com/Modsefa/modsefa
-  tag: v0.1.0
-  --sha256: sha256-pRF214loCkJNzdj/PfSCqrSyttePKPW2pK6shJERSL4=
+  tag: v0.2.0
+  --sha256: sha256-...
 
 source-repository-package
   type: git
@@ -263,8 +263,8 @@ If you want to use a different version of Modsefa (or any other `source-reposito
 **To get the hash for a different version:**
 
 ```bash
-# Replace v0.1.0 with your desired version
-nix-prefetch-git https://github.com/Modsefa/modsefa --rev v0.1.0
+# Replace v0.2.0 with your desired version
+nix-prefetch-git https://github.com/Modsefa/modsefa --rev v0.2.0
 
 # The output will show you the sha256 hash
 # Convert it to SRI format:
@@ -288,20 +288,41 @@ mv src/hello.hs src/MyLib.hs
 ```haskell
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module MyLib (main) where
 
 import Data.Proxy (Proxy(Proxy))
-import GHC.Generics (Generic)
 import GHC.TypeLits (symbolVal)
 
-import Modsefa.Core.Foundation (GetStateName, StateType(ST))
+import Modsefa.Core.Foundation
+  ( RefStrategy (OnlyAsUnique), SpecPolicySource (OwnPolicySpec)
+  , SpecStateIdentifier (TokenIdentifiedSpec) ,StateSpec(..)
+  )
 
--- Define a state type and extract its name using Modsefa's type-level functions
-type Test = GetStateName ('ST "TestState" Integer)
 
+-- 1. Define a "tag type" for your first state
+data MyFirstState
+
+-- 2. Define its properties using a StateSpec instance 
+instance StateSpec MyFirstState where 
+  type DatumName MyFirstState = "MyDatum" 
+  type DatumFields MyFirstState = 
+    '[ '("quantity", Integer) 
+     ]
+  type Identifier MyFirstState = 'TokenIdentifiedSpec 'OwnPolicySpec "MyToken" 1
+  type Strategy MyFirstState = 'OnlyAsUnique
+
+-- 3. The main function 
 main :: IO ()
-main = putStrLn (symbolVal @Test Proxy)
+main = do 
+  -- We can extract the type-level DatumName at runtime 
+  -- using symbolVal. This proves our types are linked! 
+  let datumName = symbolVal (Proxy @(DatumName MyFirstState))
+
+  putStrLn $ "My first state's datum name is: " ++ datumName
+
+
 ```
 
 ## Step 7: Enter Development Shell and Build

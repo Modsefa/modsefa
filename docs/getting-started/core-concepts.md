@@ -33,13 +33,14 @@ It defines:
 
 ---
 
-## 3. `StateType` - The On-Chain Data
+## 3. `StateSpec` - The On-Chain Data
 
-A **`StateType`** defines the structure and on-chain identity of your data. It's the "datum" in Plutus terminology. In our house analogy, a `StateType` is like defining a specific piece of furniture or an appliance, such as "a refrigerator with a freezer and an ice maker."
+A **`StateSpec`** (State Specification) is the specification for a single piece of on-chain data (a datum). It defines the properties of the data, from which Modsefa generates the actual Haskell datum type for you.
 
 It specifies:
--   The Haskell record that holds the data fields (e.g., a `Post` record with `author` and `content` fields)
--   How state instances are represented on-chain (e.g., by a UTxO containing a specific NFT)
+-   The datum's fields and their types (e.g., an `author` field of type `PubKeyHash` and a `content` field of type `BuiltinByteString`).
+-   How instances are identified on-chain (e.g., by a UTxO containing a specific NFT).
+-   How the state can be referenced (e.g., as a unique singleton, or by its properties).
 
 ---
 
@@ -60,7 +61,7 @@ Modsefa analyzes the entire collection of `ActionSpec`s associated with a valida
 
 You, the developer, define these four specifications at the type level in Haskell.
 
-1.  You start by defining your **`StateType`s** (the data)
+1.  You start by defining your **`StateSpec`s** (the data specifications)
 2.  You group them under **`ValidatorSpec`s** (the contracts that manage the data)
 3.  You define **`ActionSpec`s** (the user interactions that change the data)
 4.  Finally, you bring all your validators and actions together in the main **`AppSpec`** (the complete dApp)
